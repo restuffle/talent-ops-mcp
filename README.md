@@ -91,14 +91,19 @@ set `cwd` to the repository root (see Phase 8 for host configuration).
 
 ## MCP surface
 
+Every tool is prefixed `talent_ops_` so it cannot collide with another MCP server running in
+the same client.
+
 | Tool | Type | State | Purpose |
 |---|---|---|---|
-| `health_check` | Read | None | Server version, environment, and a live database probe. No paths or credentials. |
+| `talent_ops_health_check` | Read | None | Server version, environment, and a live database probe. No paths or credentials. |
 
-Phases 2–6 add `jobs_search`, `applications_list`, `candidate_get`, `interview_plan_get`,
-`interview_slots_propose`, `interview_schedule_preview`, `interview_schedule_confirm`,
-`interviews_upcoming`, and `feedback_overdue_list`, plus the `recruiting://` policy and
-template resources and three guided prompts.
+Phases 3–6 add `talent_ops_search_jobs`, `talent_ops_list_applications`,
+`talent_ops_get_candidate`, `talent_ops_get_interview_plan`,
+`talent_ops_propose_interview_slots`, `talent_ops_preview_interview_schedule`,
+`talent_ops_confirm_interview_schedule`, `talent_ops_list_upcoming_interviews`, and
+`talent_ops_list_overdue_feedback`, plus the `recruiting://` policy and template resources
+and three guided prompts.
 
 ### Preview and confirmation
 

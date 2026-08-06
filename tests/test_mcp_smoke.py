@@ -12,10 +12,11 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from talent_ops_mcp.server import SERVER_NAME
+from talent_ops_mcp.server import SERVER_NAME, TOOL_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 READ_TIMEOUT_SECONDS = 60.0
+HEALTH_CHECK = f"{TOOL_PREFIX}_health_check"
 
 
 async def test_stdio_subprocess_handshake_and_health_check(tmp_path: Path, subprocess_env: dict[str, str]) -> None:
@@ -32,11 +33,11 @@ async def test_stdio_subprocess_handshake_and_health_check(tmp_path: Path, subpr
             async with ClientSession(read, write, read_timeout_seconds=READ_TIMEOUT_SECONDS) as session:
                 init = await session.initialize()
                 listed = await session.list_tools()
-                result = await session.call_tool("health_check", {})
+                result = await session.call_tool(HEALTH_CHECK, {})
 
     assert init.server_info.name == SERVER_NAME
     assert init.server_info.version
-    assert {t.name for t in listed.tools} == {"health_check"}
+    assert {t.name for t in listed.tools} == {HEALTH_CHECK}
     assert result.is_error is False
     assert result.structured_content is not None
     assert result.structured_content["status"] == "healthy"

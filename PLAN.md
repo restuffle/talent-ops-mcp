@@ -37,8 +37,13 @@ Three things in v1.0 turned out to be wrong or unavailable and are corrected bel
    code on this machine.
 2. **Naming.** The project is `talent-ops-mcp` / package `talent_ops_mcp`, and the
    configuration prefix is `TALENT_OPS_`, not `RCMCP_`. §6.2 and §15 updated.
-3. **`/mcp-builder` is not installed** in the build session, so the Phase 0 task requiring it
-   cannot be performed. The empirically verified SDK reference serves that purpose instead.
+3. **Tool names.** `/mcp-builder` was installed mid-session and read in full. It found one
+   binding issue: no tool name carried a service prefix, so `health_check` in particular would
+   collide with another MCP server in the same client. Every tool is renamed
+   `talent_ops_{action}_{resource}` under the escape hatch in `PROMPT.md` §9. Adopted standards
+   are in §7.1.1; deliberate deviations, including the skill's v1/FastMCP syntax that cannot be
+   used on 2.0.0, are in §7.1.2. One new deliverable came from it — an evaluation set, added to
+   Phase 6.
 
 ---
 
@@ -299,30 +304,69 @@ must not leak an exception message.
 
 ### 7.1 Tools
 
+**Names revised August 6, 2026** under the hook in `PROMPT.md` §9 ("implement the following
+names unless the installed `/mcp-builder` skill identifies a binding compatibility issue").
+The skill identified one: none of the original names carried a service prefix, so
+`health_check` — and to a lesser degree the rest — would collide the moment this server ran
+beside another in the same client, leaving the model unable to tell which server it was
+calling. Every tool is now `talent_ops_{action}_{resource}`: prefixed, and action-first so the
+name reads as the thing it does. A contract test asserts the prefix on *every* registered
+tool, so a later phase cannot reintroduce an unprefixed name.
+
 | Tool | Phase | Type | Purpose |
 |---|---:|---|---|
-| `health_check` | 1 | Read | Confirm server readiness and report non-sensitive version information |
-| `jobs_search` | 3 | Read | Search open or closed jobs using bounded filters |
-| `applications_list` | 3 | Read | List applications by job, stage, status, or scheduling need |
-| `candidate_get` | 3 | Read | Retrieve one candidate and relevant application context |
-| `interview_plan_get` | 3 | Read | Retrieve approved duration, panel, skill, and scheduling rules |
-| `interview_slots_propose` | 4 | Compute/read | Calculate compatible slots without changing state |
-| `interview_schedule_preview` | 5 | Local preview | Create an exact, expiring proposal and confirmation token |
-| `interview_schedule_confirm` | 5 | Mutation | Atomically create one interview from an unchanged valid preview |
-| `interviews_upcoming` | 6 | Read | Report upcoming interviews using bounded date filters |
-| `feedback_overdue_list` | 6 | Read | Report missing feedback without evaluating candidates |
+| `talent_ops_health_check` | 1 ✅ | Read | Confirm server readiness and report non-sensitive version information |
+| `talent_ops_search_jobs` | 3 | Read | Search open or closed jobs using bounded filters |
+| `talent_ops_list_applications` | 3 | Read | List applications by job, stage, status, or scheduling need |
+| `talent_ops_get_candidate` | 3 | Read | Retrieve one candidate and relevant application context |
+| `talent_ops_get_interview_plan` | 3 | Read | Retrieve approved duration, panel, skill, and scheduling rules |
+| `talent_ops_propose_interview_slots` | 4 | Compute/read | Calculate compatible slots without changing state |
+| `talent_ops_preview_interview_schedule` | 5 | Local preview | Create an exact, expiring proposal and confirmation token |
+| `talent_ops_confirm_interview_schedule` | 5 | Mutation | Atomically create one interview from an unchanged valid preview |
+| `talent_ops_list_upcoming_interviews` | 6 | Read | Report upcoming interviews using bounded date filters |
+| `talent_ops_list_overdue_feedback` | 6 | Read | Report missing feedback without evaluating candidates |
 
-Later tools:
+Later tools, same convention:
 
-- `interview_reschedule_preview`
-- `interview_reschedule_confirm`
-- `interview_cancel_preview`
-- `interview_cancel_confirm`
-- `candidate_email_draft`
-- `feedback_reminder_preview`
-- `feedback_reminder_send`
+- `talent_ops_preview_interview_reschedule` / `talent_ops_confirm_interview_reschedule`
+- `talent_ops_preview_interview_cancel` / `talent_ops_confirm_interview_cancel`
+- `talent_ops_draft_candidate_email`
+- `talent_ops_preview_feedback_reminder` / `talent_ops_send_feedback_reminder`
 
 Sending and cancellation remain disabled until provider authorization, audit, and confirmation requirements are complete.
+
+### 7.1.1 Tool contract standards (from `/mcp-builder`)
+
+Binding on every tool from Phase 3 onward:
+
+- **Prefix.** `talent_ops_` on every name, enforced by a contract test.
+- **All four annotations** set explicitly: `read_only_hint`, `destructive_hint`,
+  `idempotent_hint`, `open_world_hint`. `open_world_hint` is `False` while the only backend is
+  local SQLite and **must flip to `True`** for any tool that reaches a calendar or ATS in
+  Phases 9–10.
+- **Descriptions state when *not* to use the tool**, not only when to use it. A description
+  with a "Use when:" but no "Do not use:" is incomplete; a test asserts both on
+  `talent_ops_health_check` and the same standard applies to the rest.
+- **Errors are actionable.** A failure or degraded result names the next step the caller can
+  take, using environment-variable names and identifiers rather than paths. See
+  `DEGRADED_DETAIL` in `server.py` for the shape.
+- **Pagination metadata.** Every list tool returns `total`, `count`, `has_more`, and
+  `next_cursor` — not just items and a cursor. `has_more` and `total` were added on the skill's
+  recommendation; cursor-based paging is kept over `offset` because it stays correct when rows
+  are inserted between pages, and the skill accepts `next_cursor` as an alternative to
+  `next_offset`.
+
+### 7.1.2 Deliberate deviations from `/mcp-builder`
+
+Recorded so they read as decisions rather than oversights.
+
+| Skill guidance | Decision | Why |
+|---|---|---|
+| `from mcp.server.fastmcp import FastMCP`, `FastMCP("service_mcp")`, `annotations={"readOnlyHint": ...}` dict, `ctx.log_info`, `ctx.request_context.lifespan_state`, `TypedDict` returns, `mcp.run(transport="streamable_http")` | **Not used** | All are v1 idiom. `mcp.server.fastmcp` is not importable in 2.0.0; annotations are `ToolAnnotations(read_only_hint=...)`; the logging capability is deprecated (SEP-2577); the attribute is `lifespan_context`; `TypedDict` hits SDK issues #3224/#3227. §5.2 forbids mixing eras. The skill's *design principles* are followed throughout. |
+| Every data tool accepts `response_format: markdown \| json` | **Not implemented** | Superseded by v2 structured output: a Pydantic return annotation already yields `structured_content` *plus* a JSON text block, so the machine-readable half is native. One annotated function cannot also return a markdown string without giving up the auto-generated `output_schema`, and the parameter would double the input surface on nine tools. Revisit only if token cost on large result sets measurably hurts. |
+| Server name `{service}_mcp` | **Followed** — `talent_ops_mcp` | The distribution and console script stay hyphenated (`talent-ops-mcp`), which is PyPI and CLI convention. Only the protocol-advertised name uses underscores. |
+| Comprehensive docstrings restating the full output schema in prose | **Partially** | The "Use when / Do not use" and return summary are kept because they carry real signal. The field-by-field schema is not restated: v2 generates `output_schema` from the Pydantic model, and duplicating it in prose invites the two to drift — which the skill's own DRY principle argues against. |
+| Build evaluations (skill Phase 4) | **Adopted as a new deliverable** | Neither `PLAN.md` 1.0 nor `PROMPT.md` mentioned it. Added to Phase 6 — see §12. |
 
 ### 7.2 Resources
 
@@ -341,6 +385,11 @@ Sending and cancellation remain disabled until provider authorization, audit, an
 | `schedule_candidate_interview` | Guide a user through lookup, proposal, preview, and confirmation |
 | `prepare_interview_day` | Summarize logistics for upcoming interviews without candidate evaluation |
 | `review_pipeline_delays` | Identify administrative bottlenecks and missing coordination work |
+
+Prompts keep their unprefixed names from `PROMPT.md` §15. `/mcp-builder`'s prefix rule is about
+*tools*, where the model auto-selects and a collision is silently wrong. Prompts live in a
+separate namespace and a human picks one deliberately from a menu, so the collision cost is a
+duplicate menu entry rather than a misrouted call.
 
 ---
 
@@ -544,7 +593,7 @@ High-impact state changes use a two-step protocol.
 
 ### 10.1 Preview
 
-`interview_schedule_preview`:
+`talent_ops_preview_interview_schedule`:
 
 1. Revalidates the application, plan, slot, and attendees.
 2. Constructs the complete immutable operation payload.
@@ -559,7 +608,7 @@ High-impact state changes use a two-step protocol.
 
 ### 10.2 Confirmation
 
-`interview_schedule_confirm`:
+`talent_ops_confirm_interview_schedule`:
 
 1. Hashes the presented token and loads the matching preview.
 2. Verifies operation type, actor, expiration, unused status, and payload hash.
@@ -622,11 +671,15 @@ Freeze the product boundary, tool contracts, version baseline, and acceptance cr
 ### Tasks
 
 - [x] Inspect repository and instruction files.
-- [x] ~~Invoke and follow the installed Claude `/mcp-builder` skill.~~ **Not possible** — the skill
-      is not installed in this environment. Replaced by empirical SDK verification: the package was
-      installed into a throwaway environment and exercised end to end with a live in-process client,
-      producing `docs/reference/mcp-v2-verified-api.md` and the probes beside it. Stronger evidence
-      than the skill would have given, since it tests the SDK actually installed here.
+- [x] Invoke and follow the installed Claude `/mcp-builder` skill. **Done** — the skill was
+      installed mid-project (`example-skills@anthropic-agent-skills`) and read in full, along with
+      its `mcp_best_practices.md` and `python_mcp_server.md` references. Its design principles are
+      adopted; its v1/FastMCP syntax is not, and cannot be, since `mcp.server.fastmcp` does not
+      exist in 2.0.0. Findings, adopted standards, and deliberate deviations are recorded in §7.1.1
+      and §7.1.2. The one binding change it produced: **every tool is renamed with a
+      `talent_ops_` prefix**, under the escape hatch `PROMPT.md` §9 provides for exactly this.
+      Empirical SDK verification (`docs/reference/mcp-v2-verified-api.md` and the probes beside it)
+      remains the authority on *syntax*, because the skill's is a version behind.
 - [x] Verify the current stable MCP Python SDK and supported syntax — **`mcp` 2.0.0 is stable;
       `FastMCP` no longer exists**. See §5.2.
 - [x] Record the selected Python and SDK versions — §5.1 table.
@@ -679,8 +732,11 @@ Produce an installable Python package with a working stdio MCP server.
       `MCPServer(...)` and stripping any pre-existing stdout handler.
 - [x] Implement ~~FastMCP~~ **`MCPServer`** metadata and restrictive instructions — `server.py`,
       with `version=` passed explicitly because v2 defaults it to `""`.
-- [x] Add `health_check` — read-only annotations, Pydantic output model, live database probe,
-      no paths or credentials in the result.
+- [x] Add ~~`health_check`~~ **`talent_ops_health_check`** — read-only annotations, Pydantic
+      output model, live database probe, no paths or credentials in the result. Renamed and
+      upgraded on 2026-08-06 after `/mcp-builder` became available: service prefix, a description
+      stating when *not* to use it, and a `detail` field carrying an actionable next step when the
+      report is degraded.
 - [x] Add module and console-script entry points — `talent-ops-mcp` and `python -m talent_ops_mcp`.
 - [x] Add `.env.example` and `.gitignore`.
 - [x] Add initial README commands.
@@ -689,7 +745,13 @@ Produce an installable Python package with a working stdio MCP server.
 - [x] **Added beyond plan:** `errors.py` — `ErrorCode` plus the `sanitized()` chokepoint. Not
       optional: v2 hands `str(exception)` from a tool body to the client verbatim.
 
-### Tests — 41 passed, 1 skipped
+- [x] **Added after `/mcp-builder` (2026-08-06):** a contract test asserting *every* registered
+      tool carries the `talent_ops_` prefix, so a later phase cannot reintroduce a collision-prone
+      name; a test that the old unprefixed `health_check` no longer answers; a test that the
+      description contains both "Use when:" and "Do not use:"; and coverage of the degraded
+      branch, which was previously untested.
+
+### Tests — 45 passed, 1 skipped
 
 - [x] Package imports from a clean environment.
 - [x] Console script entry point registered and resolvable.
@@ -715,10 +777,10 @@ uv sync --all-groups   pass   48 packages
 ruff format --check .  pass   20 files
 ruff check .           pass   no findings, no broad suppressions
 mypy src tests         pass   strict, 12 files, 0 ignores in src
-pytest                 pass   41 passed, 1 skipped
+pytest                 pass   45 passed, 1 skipped
 uv build               pass   sdist + wheel
 MCP initialize         pass   in-process and stdio subprocess
-health_check call      pass   status=healthy, database=connected
+tool call              pass   talent_ops_health_check -> healthy, database=connected
 ```
 
 ### Findings worth carrying forward
@@ -781,12 +843,13 @@ Expose useful recruiting context without state changes.
 ### Tasks
 
 - [ ] Implement recruiting service.
-- [ ] Implement `jobs_search`.
-- [ ] Implement `applications_list`.
-- [ ] Implement `candidate_get`.
-- [ ] Implement `interview_plan_get`.
+- [ ] Implement `talent_ops_search_jobs`.
+- [ ] Implement `talent_ops_list_applications`.
+- [ ] Implement `talent_ops_get_candidate`.
+- [ ] Implement `talent_ops_get_interview_plan`.
 - [ ] Add typed Pydantic inputs and outputs.
-- [ ] Add bounded pagination.
+- [ ] Add bounded pagination returning `total`, `count`, `has_more`, and `next_cursor` — see
+      §7.1.1. Bare items-plus-cursor is not enough; the model needs to know whether to keep going.
 - [ ] Add safe not-found and validation errors.
 - [ ] Ensure returned fields follow least-data principles.
 - [ ] Add tool descriptions stating when each tool should and should not be used.
@@ -826,7 +889,7 @@ Calculate valid interview slots without modifying state.
 - [ ] Implement panel combination selection.
 - [ ] Implement 15-minute slot alignment.
 - [ ] Implement deterministic option ordering.
-- [ ] Implement `interview_slots_propose`.
+- [ ] Implement `talent_ops_propose_interview_slots`.
 - [ ] Explain why options are valid without exposing private calendar details.
 - [ ] Return a clear reason when no slot exists.
 
@@ -866,8 +929,8 @@ Add the first mutation using a robust human-confirmation protocol.
 - [ ] Implement payload hashing.
 - [ ] Implement cryptographically secure token generation and hash storage.
 - [ ] Implement token expiration and single-use behavior.
-- [ ] Implement `interview_schedule_preview`.
-- [ ] Implement `interview_schedule_confirm`.
+- [ ] Implement `talent_ops_preview_interview_schedule`.
+- [ ] Implement `talent_ops_confirm_interview_schedule`.
 - [ ] Implement transactional interview, attendee, feedback-request, and audit creation.
 - [ ] Implement idempotency key enforcement.
 - [ ] Recheck conflicts during confirmation.
@@ -902,8 +965,8 @@ Make the server useful for recurring coordination workflows.
 
 ### Tasks
 
-- [ ] Implement `interviews_upcoming`.
-- [ ] Implement `feedback_overdue_list`.
+- [ ] Implement `talent_ops_list_upcoming_interviews`.
+- [ ] Implement `talent_ops_list_overdue_feedback`.
 - [ ] Add scheduling and communication policy resources.
 - [ ] Add invitation and rescheduling template resources.
 - [ ] Add dynamic interview-plan resource.
@@ -911,6 +974,17 @@ Make the server useful for recurring coordination workflows.
 - [ ] Add `prepare_interview_day` prompt.
 - [ ] Add `review_pipeline_delays` prompt.
 - [ ] Ensure prompt text cannot override server authorization or prohibited operations.
+- [ ] **Build an evaluation set** — new deliverable from `/mcp-builder` Phase 4, absent from
+      `PLAN.md` 1.0 and `PROMPT.md`. Ten questions in `evaluations/talent_ops_eval.xml`
+      (`<evaluation><qa_pair><question/><answer/></qa_pair></evaluation>`), each independent,
+      read-only, requiring several tool calls, and verifiable by string comparison. This lands in
+      Phase 6 rather than earlier because it needs the seeded data from Phase 2 and the full
+      read/report surface to be worth writing.
+      **Safety constraint specific to this project:** no question may ask which candidate is
+      better, stronger, or more suitable. Every answer must be a logistics fact — a count, a time,
+      a timezone, an interviewer name, a stage, an overdue tally — never a judgement about a
+      person. An evaluation set that rewards comparative candidate reasoning would train exactly
+      the behaviour §2.2 forbids.
 
 ### Tests
 
@@ -1217,7 +1291,7 @@ Future provider variables must use provider-specific prefixes and must never app
 
 | Milestone | Included phases | Demonstrable result |
 |---|---|---|
-| M1: MCP skeleton | 0–1 | Client connects and calls `health_check` |
+| M1: MCP skeleton | 0–1 ✅ | Client connects and calls `talent_ops_health_check` |
 | M2: Recruiting browser | 2–3 | Client finds jobs, candidates, applications, and interview plans |
 | M3: Scheduling assistant | 4 | Client proposes correct interview slots |
 | M4: Safe coordinator | 5 | Human-confirmed interview creation with audit and replay protection |

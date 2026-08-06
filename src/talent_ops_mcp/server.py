@@ -26,7 +26,15 @@ from talent_ops_mcp.settings import Settings
 
 _log = logging.getLogger(__name__)
 
-SERVER_NAME = "talent-ops-mcp"
+# `{service}_mcp` per the mcp-builder skill's Python naming convention. The console script
+# and the distribution stay hyphenated (`talent-ops-mcp`) because that is the CLI and PyPI
+# convention; this constant is only the name the server advertises over the protocol.
+SERVER_NAME = "talent_ops_mcp"
+
+# Every tool carries this prefix. Without it, a generic name like `health_check` collides the
+# moment this server runs alongside another in the same client, and the model cannot tell
+# which server it is calling.
+TOOL_PREFIX = "talent_ops"
 
 INSTRUCTIONS = """\
 Talent Ops coordinates recruiting logistics. It is an administrative assistant, not a \
@@ -77,6 +85,12 @@ def app_state(ctx: Context[Any]) -> AppState:
     return state
 
 
+DEGRADED_DETAIL = (
+    "The database could not be opened. Check that TALENT_OPS_DATA_DIR points at a writable "
+    "directory and that TALENT_OPS_DATABASE_PATH resolves inside it, then call this tool again."
+)
+
+
 class HealthCheckResult(BaseModel):
     """Non-sensitive readiness report. Carries no paths, URLs, or credentials."""
 
@@ -87,6 +101,10 @@ class HealthCheckResult(BaseModel):
     environment: str = Field(description="Configured runtime environment.")
     database: Literal["connected", "unavailable"] = Field(description="Result of a live one-statement probe.")
     mcp_sdk_version: str = Field(description="Version of the installed MCP Python SDK.")
+    detail: str | None = Field(
+        default=None,
+        description="Actionable next step when status is degraded. Null when healthy.",
+    )
 
 
 def sdk_version() -> str:
@@ -147,33 +165,44 @@ def build_server(settings: Settings) -> MCPServer[AppState]:
     )
 
     @mcp.tool(
-        name="health_check",
-        title="Health check",
+        name=f"{TOOL_PREFIX}_health_check",
+        title="Check Talent Ops server health",
         description=(
-            "Confirm the server is running and its database is reachable. Returns version and "
-            "environment information only -- no paths, credentials, or recruiting data. "
-            "Use this to diagnose a connection problem. It is not needed before ordinary calls."
+            "Confirm this Talent Ops server is running and its database is reachable.\n\n"
+            "Returns status (healthy or degraded), this server's version, the configured "
+            "environment, database connectivity, the MCP SDK version, and — when degraded — an "
+            "actionable next step. Never returns filesystem paths, connection strings, "
+            "credentials, or any recruiting data.\n\n"
+            "Use when: another tool failed unexpectedly and you need to tell a server-side "
+            "problem apart from a bad request, or the user asks whether the server is set up "
+            "correctly.\n"
+            "Do not use: as a warm-up before ordinary calls — it is not required and costs a "
+            "round trip. It reports nothing about jobs, candidates, applications, or interviews."
         ),
         annotations=ToolAnnotations(
-            title="Health check",
+            title="Check Talent Ops server health",
             read_only_hint=True,
             destructive_hint=False,
             idempotent_hint=True,
+            # Local SQLite only. This flips to True in Phase 9-10, when calendar and ATS
+            # adapters make the server reach real external systems.
             open_world_hint=False,
         ),
     )
-    async def health_check(ctx: Context[AppState]) -> HealthCheckResult:
-        with sanitized("health_check", ctx.request_id):
+    async def talent_ops_health_check(ctx: Context[AppState]) -> HealthCheckResult:
+        with sanitized(f"{TOOL_PREFIX}_health_check", ctx.request_id):
             state = app_state(ctx)
             database: Literal["connected", "unavailable"] = (
                 "connected" if await probe_database(state.engine) else "unavailable"
             )
+            healthy = database == "connected"
             return HealthCheckResult(
-                status="healthy" if database == "connected" else "degraded",
+                status="healthy" if healthy else "degraded",
                 version=__version__,
                 environment=state.settings.env,
                 database=database,
                 mcp_sdk_version=sdk_version(),
+                detail=None if healthy else DEGRADED_DETAIL,
             )
 
     return mcp
