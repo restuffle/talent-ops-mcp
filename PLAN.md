@@ -147,7 +147,7 @@ Verified installed versions as of August 6, 2026:
 | Component | Version | Note |
 |---|---|---|
 | Python | 3.11.15 | `uv` manages the interpreter; `.python-version` pins 3.11 |
-| `uv` | 0.11.32 | `link-mode = "copy"` set — OneDrive breaks hardlinking |
+| `uv` | 0.11.32 | Default link mode; the repository lives outside OneDrive as of 2026-08-06 |
 | `mcp` | **2.0.0**, exact pin | Pulls `mcp-types==2.0.0`, `httpx2`, `pyjwt`, `starlette` |
 | SQLAlchemy | 2.0.51 | async engine |
 | `aiosqlite` | 0.22.1 | local implementation |
@@ -790,9 +790,23 @@ tool call              pass   talent_ops_health_check -> healthy, database=conne
 2. **`extra="forbid"` is asymmetric.** A typo'd key in `.env` is rejected, but a typo'd
    `TALENT_OPS_*` shell variable is silently ignored — pydantic-settings only looks up known
    field names in the environment. Both behaviours are now pinned by tests.
-3. **`uv` hardlinking fails under OneDrive** (`os error 396`). Fixed permanently with
-   `link-mode = "copy"` in `[tool.uv]`.
-4. **Ruff `ANN401` and Mypy disagree** about dynamically-typed test kwargs. Resolved by driving
+3. **A synced folder is the wrong home for this repository.** Under OneDrive, `uv build` failed
+   on hardlinks (`os error 396`), `uv sync` repeatedly failed to replace `.venv/…/dist-info`
+   (`os error 5`), and OneDrive held a lock that stopped git from removing `.git/rebase-merge`
+   *during a rebase* — the last is the genuinely dangerous one, since a lock landing mid-rebase
+   can leave a repository in a confusing half-finished state. Resolved on 2026-08-06 by moving to
+   `C:\Development\Personal\talent-ops-mcp`, after which hardlinking works and the
+   `link-mode = "copy"` workaround was removed rather than left to rot with a stale comment.
+4. **Application Control blocks some generated console-script shims.** At the new location,
+   `pytest.exe` is refused with `os error 4551` while `python.exe`, `ruff.exe`, `mypy.exe`, and
+   the `talent-ops-mcp` console script all run. Every documented command uses
+   `uv run python -m pytest`. The cause is not fully explained by path alone — `ruff` and `mypy`
+   run from the same directory — so treat any new console script as unverified until tried.
+5. **A moved checkout leaves a poisoned editable install.** After the move, the copied `.venv`
+   still resolved `talent_ops_mcp` to the *old* OneDrive path via
+   `dist-info/direct_url.json`, so tests would have passed while exercising the old files. Always
+   `rm -rf .venv && uv sync --all-groups` after relocating.
+6. **Ruff `ANN401` and Mypy disagree** about dynamically-typed test kwargs. Resolved by driving
    invalid configuration through environment variables instead — better fidelity, zero
    suppressions.
 
@@ -1185,9 +1199,14 @@ uv sync --all-groups
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
-uv run pytest
+uv run python -m pytest
 uv build
 ```
+
+`python -m pytest` rather than `uv run pytest`: Application Control on this managed Windows
+machine blocks the generated `pytest.exe` shim (`os error 4551`) while allowing `python.exe`.
+The module form is equivalent. `ruff`, `mypy`, and the `talent-ops-mcp` console script were
+verified unaffected.
 
 If the selected SDK version changes these commands, document and use the verified equivalents.
 

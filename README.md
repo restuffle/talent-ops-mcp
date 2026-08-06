@@ -176,12 +176,17 @@ uv sync --all-groups
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
-uv run pytest
+uv run python -m pytest
 uv build
 ```
 
 A phase is not complete while any of these fail. Broad lint or type suppressions are not
 used; each narrow `# noqa` carries its justification inline.
+
+`python -m pytest` rather than `uv run pytest`: on a managed Windows machine, Application
+Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) while allowing
+`python.exe`. The module form is equivalent, so it is the documented command everywhere. `ruff`,
+`mypy`, and the `talent-ops-mcp` console script were not affected.
 
 ## Troubleshooting
 
@@ -191,7 +196,9 @@ used; each narrow `# noqa` carries its justification inline.
 | `database: unavailable` from `health_check` | The data directory is not writable, or `TALENT_OPS_DATABASE_PATH` points somewhere the process cannot create. |
 | Client hangs on connect | Something wrote to stdout before serving began. Never `print()`; never add a `StreamHandler(sys.stdout)`. |
 | `ModuleNotFoundError: talent_ops_mcp` | Run through `uv run`, or `uv sync` first — the package must be installed, not just present. |
-| `os error 396` on `uv build` | uv's hardlinking does not work under OneDrive. Already handled by `link-mode = "copy"` in `pyproject.toml`; if you moved the repo, that setting is now unnecessary but harmless. |
+| `os error 4551` / "Application Control policy has blocked this file" | A managed-Windows policy refused a generated console-script `.exe`. Run the module form instead — `uv run python -m pytest`. |
+| `os error 396` on `uv build`, or `os error 5` on `uv sync` | uv's hardlinking and file replacement fail under OneDrive. Do not keep this repository in a synced folder; `.venv` and `.git` both get locked mid-operation. Fixed by moving it out — a lock landing mid-`git rebase` is the genuinely dangerous case. |
+| Tests pass but changes seem to have no effect | The editable install may point at an old copy of the repository. Check `.venv/Lib/site-packages/talent_ops_mcp-*.dist-info/direct_url.json`; if the path is wrong, `rm -rf .venv` and `uv sync --all-groups`. |
 
 ## Known limitations
 
