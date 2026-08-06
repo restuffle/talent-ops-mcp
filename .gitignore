@@ -1,0 +1,33 @@
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# the seeded demo database and anything else generated at runtime
+data/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

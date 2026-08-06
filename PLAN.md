@@ -1,12 +1,44 @@
-# Recruiting Coordinator MCP Server
+# Talent Ops MCP Server
 
 ## Phased Project Plan
 
-**Document version:** 1.0  
-**Prepared:** July 24, 2026  
+**Document version:** 1.1  
+**Prepared:** July 24, 2026 · **Revised:** August 6, 2026  
 **Initial delivery model:** Local MCP server over stdio  
 **Initial data source:** SQLite populated only with fictional recruiting data  
 **Future integrations:** Greenhouse Harvest API v3 or Lever, plus Microsoft Graph or Google Calendar
+
+---
+
+## 0. Progress at a glance
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 — Discovery, safety, contracts | ✅ Complete | SDK verified empirically; see `docs/reference/mcp-v2-verified-api.md` |
+| 1 — Foundation and MCP handshake | ✅ Complete | All gates green: ruff, mypy, 41 passed / 1 skipped, `uv build` |
+| 2 — SQLite schema, repository, seed | ⬜ Not started | Next |
+| 3 — Read-only recruiting tools | ⬜ Not started | |
+| 4 — Deterministic scheduling engine | ⬜ Not started | |
+| 5 — Preview and confirmed scheduling | ⬜ Not started | |
+| 6 — Reporting, resources, prompts | ⬜ Not started | |
+| 7 — Security and quality hardening | ⬜ Not started | |
+| 8 — Claude and Inspector integration | ⬜ Not started | |
+| 9 — Calendar provider integration | ⬜ Deferred | Post-MVP |
+| 10 — ATS integration | ⬜ Deferred | Post-MVP |
+| 11 — Remote and production readiness | ⬜ Deferred | Requires security approval |
+
+### Revision 1.1 changes (August 6, 2026)
+
+Three things in v1.0 turned out to be wrong or unavailable and are corrected below:
+
+1. **The SDK.** `mcp` 2.0.0 went GA on 2026-07-28, four days after this plan was written.
+   `FastMCP` does not exist in v2. §5.2 and §5.3 are rewritten; the binding reference is
+   `docs/reference/mcp-v2-verified-api.md`, every claim in which was produced by running
+   code on this machine.
+2. **Naming.** The project is `talent-ops-mcp` / package `talent_ops_mcp`, and the
+   configuration prefix is `TALENT_OPS_`, not `RCMCP_`. §6.2 and §15 updated.
+3. **`/mcp-builder` is not installed** in the build session, so the Phase 0 task requiring it
+   cannot be performed. The empirically verified SDK reference serves that purpose instead.
 
 ---
 
@@ -105,28 +137,57 @@ The production-ready version is successful when the same domain contracts work a
 
 ### 5.1 Runtime and libraries
 
-- Python 3.11 or newer.
-- `uv` for dependency and environment management.
-- Official MCP Python SDK.
-- FastMCP from the official SDK unless a low-level protocol feature is demonstrably necessary.
-- SQLAlchemy 2.x.
-- SQLite with `aiosqlite` for the local implementation.
-- Pydantic and `pydantic-settings`.
-- `pytest` and `pytest-asyncio`.
-- Ruff for formatting and linting.
-- Mypy for static type checking.
-- `httpx` for later HTTP integrations.
-- `respx` for mocked HTTP integration tests when external providers are added.
+Verified installed versions as of August 6, 2026:
 
-### 5.2 MCP SDK version rule
+| Component | Version | Note |
+|---|---|---|
+| Python | 3.11.15 | `uv` manages the interpreter; `.python-version` pins 3.11 |
+| `uv` | 0.11.32 | `link-mode = "copy"` set — OneDrive breaks hardlinking |
+| `mcp` | **2.0.0**, exact pin | Pulls `mcp-types==2.0.0`, `httpx2`, `pyjwt`, `starlette` |
+| SQLAlchemy | 2.0.51 | async engine |
+| `aiosqlite` | 0.22.1 | local implementation |
+| Pydantic / `pydantic-settings` | 2.13.4 / 2.14.2 | |
+| `pytest` / `pytest-asyncio` | 9.1.1 / 1.4.0 | `asyncio_mode = "auto"` |
+| Ruff | 0.16.1 | format and lint |
+| Mypy | 2.3.0 | `strict = true` |
 
-The implementation must verify the current stable official MCP Python SDK before dependencies are selected. As of July 24, 2026, the official repository describes v1.x as stable and v2 as pre-release. If that remains true, use a compatible constraint such as:
+Deferred until the phase that needs them: `httpx` (v2 already ships `httpx2`) and `respx`,
+for the mocked provider tests in Phases 9–10.
+
+### 5.2 MCP SDK version rule — **resolved**
+
+`mcp` 2.0.0 went GA on 2026-07-28, four days after this plan was drafted, and **v2 is the
+stable major**. The constraint `mcp[cli]>=1.27,<2` written above is obsolete. The project
+uses:
 
 ```toml
-mcp[cli] = ">=1.27,<2"
+mcp = "==2.0.0"
 ```
 
-If v2 is stable at implementation time, use stable v2 APIs consistently. Never combine v1 and v2 imports, decorators, client patterns, or transport APIs.
+An exact pin, not a range: 2.0.0 is days past GA with 15 issues filed and none closed, so an
+SDK change must be a deliberate reviewed bump. The `cli` extra is not needed — MCP Inspector
+is a Node tool.
+
+**v2 is a major rework, not a version bump.** The differences that change this plan:
+
+- **`FastMCP` does not exist.** `mcp.server.fastmcp` is not importable and there is no
+  deprecation shim. Read **`MCPServer`** everywhere this document says FastMCP.
+- **An exception message raised inside a tool body reaches the client verbatim.** The SDK's
+  sanitisation lives at the protocol-handler layer, outside the tool body. This is the single
+  most important security consequence: every tool adapter must funnel through
+  `errors.sanitized()`.
+- **Wire model fields are snake_case** (`input_schema`, `is_error`, `structured_content`,
+  `next_cursor`).
+- **The SDK no longer reads `MCP_*` or `.env`.** All configuration is ours.
+- **Sync handlers run on a worker thread** and cannot reach the event loop, so every handler
+  touching the database must be `async def`.
+- **A static resource may not declare a `Context` parameter** — it fails at *import*. The four
+  static policy/template resources therefore have no route to the database and must be served
+  from module constants.
+
+The binding reference is `docs/reference/mcp-v2-verified-api.md`, with re-runnable probes in
+`docs/reference/probes/`. Never combine v1 and v2 imports, decorators, client patterns, or
+transport APIs.
 
 ### 5.3 Initial transport
 
@@ -135,7 +196,18 @@ Use stdio for the local server:
 - Standard output is reserved for MCP protocol traffic.
 - Application logging goes to standard error.
 - No banner, diagnostics, or `print()` output may corrupt stdout.
-- The server runs as a console script and as a Python module.
+- The server runs as a console script (`talent-ops-mcp`) and as a Python module
+  (`python -m talent_ops_mcp`).
+
+v2 hardens this for us: `stdio_server()` claims file descriptors 0 and 1, serves from a
+private duplicate, and diverts anything written to the original stdout to stderr. That is a
+safety net, not a licence — output flushed *before* serving begins, or buffered until
+interpreter exit, still lands on the wire. **Never call `print()`; emit nothing at import
+time; never add a `StreamHandler(sys.stdout)`.**
+
+Constructing an `MCPServer` calls `logging.basicConfig()` itself, and `basicConfig()` never
+replaces existing handlers, so `logging_config.configure_logging()` must run **before** the
+server is constructed or the SDK's handler wins.
 
 Streamable HTTP is deferred until a real remote deployment is justified.
 
@@ -145,7 +217,7 @@ Streamable HTTP is deferred until a real remote deployment is justified.
 
 ```mermaid
 flowchart LR
-    Host["Claude or MCP Inspector"] -->|"MCP over stdio"| Server["FastMCP server"]
+    Host["Claude or MCP Inspector"] -->|"MCP over stdio"| Server["MCPServer (mcp 2.0.0)"]
     Server --> Tools["MCP tool adapters"]
     Server --> Resources["MCP resources and prompts"]
     Tools --> Recruiting["Recruiting service"]
@@ -174,69 +246,52 @@ flowchart LR
 
 ### 6.2 Proposed repository layout
 
+`✅` exists as of Phase 1; everything else is created by the phase that needs it.
+
 ```text
-recruiting-coordinator-mcp/
-├── pyproject.toml
-├── uv.lock
-├── README.md
-├── SECURITY.md
-├── LICENSE
-├── .env.example
-├── .gitignore
+talent-ops-mcp/
+├── pyproject.toml                       ✅
+├── uv.lock                              ✅
+├── .python-version                      ✅
+├── README.md                            ✅
+├── PLAN.md  PROMPT.md                   ✅
+├── docs/reference/                      ✅  verified SDK API + re-runnable probes
+├── SECURITY.md                              Phase 7
+├── LICENSE                                  Phase 8
+├── .env.example                         ✅
+├── .gitignore                           ✅
 ├── scripts/
-│   └── seed_demo_data.py
+│   └── seed_demo_data.py                    Phase 2
 ├── src/
-│   └── recruiting_coordinator_mcp/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── server.py
-│       ├── settings.py
-│       ├── logging_config.py
-│       ├── errors.py
-│       ├── models/
-│       │   ├── __init__.py
-│       │   ├── domain.py
-│       │   ├── inputs.py
-│       │   └── outputs.py
-│       ├── db/
-│       │   ├── __init__.py
-│       │   ├── base.py
-│       │   ├── schema.py
-│       │   ├── session.py
-│       │   └── seed.py
-│       ├── repositories/
-│       │   ├── __init__.py
-│       │   ├── protocols.py
-│       │   └── sqlite.py
-│       ├── services/
-│       │   ├── __init__.py
-│       │   ├── recruiting.py
-│       │   ├── scheduling.py
-│       │   ├── confirmation.py
-│       │   └── audit.py
-│       ├── tools/
-│       │   ├── __init__.py
-│       │   ├── jobs.py
-│       │   ├── candidates.py
-│       │   ├── interviews.py
-│       │   └── reporting.py
-│       ├── resources/
-│       │   ├── __init__.py
-│       │   ├── policies.py
-│       │   └── templates.py
-│       └── prompts/
-│           ├── __init__.py
-│           └── workflows.py
+│   └── talent_ops_mcp/
+│       ├── __init__.py                  ✅
+│       ├── __main__.py                  ✅
+│       ├── server.py                    ✅
+│       ├── settings.py                  ✅
+│       ├── logging_config.py            ✅
+│       ├── errors.py                    ✅
+│       ├── models/                           Phase 2-3  domain, inputs, outputs
+│       ├── db/                               Phase 2     base, schema, session, seed
+│       ├── repositories/                     Phase 2     protocols, sqlite
+│       ├── services/                         Phase 3-5   recruiting, scheduling, confirmation, audit
+│       ├── tools/                            Phase 3-6   jobs, candidates, interviews, reporting
+│       ├── resources/                        Phase 6     policies, templates
+│       └── prompts/                          Phase 6     workflows
 └── tests/
-    ├── conftest.py
-    ├── fixtures/
-    ├── unit/
-    ├── integration/
-    ├── contract/
-    └── test_mcp_smoke.py
+    ├── conftest.py                       ✅
+    ├── unit/                             ✅  settings, errors, logging
+    ├── contract/                         ✅  in-process MCP client
+    ├── integration/                          Phase 2
+    ├── fixtures/                             Phase 2
+    └── test_mcp_smoke.py                 ✅  real stdio subprocess
 ```
 
 Avoid empty modules created only for appearance. Add a module when it has a clear responsibility.
+
+Phase 1 deliberately did not create the `models/`, `db/`, `tools/`, `resources/`, or `prompts/`
+packages: `health_check` and its output model live in `server.py` until Phase 3 gives them
+company. `errors.py` earns its place immediately because `health_check` is already a tool and
+must not leak an exception message.
 
 ---
 
@@ -558,7 +613,7 @@ MCP responses must never contain:
 
 ## 12. Phase Plan
 
-## Phase 0 — Discovery, Safety, and Contracts
+## Phase 0 — Discovery, Safety, and Contracts ✅
 
 ### Objective
 
@@ -566,35 +621,46 @@ Freeze the product boundary, tool contracts, version baseline, and acceptance cr
 
 ### Tasks
 
-- [ ] Inspect repository and instruction files.
-- [ ] Invoke and follow the installed Claude `/mcp-builder` skill.
-- [ ] Verify the current stable MCP Python SDK and supported FastMCP syntax.
-- [ ] Record the selected Python and SDK versions.
-- [ ] Create a tool inventory with read/mutation classification.
-- [ ] Finalize entities, enums, error codes, and result models.
-- [ ] Document the prohibited employment-decision behavior.
-- [ ] Create initial threat model.
-- [ ] Decide configuration names and safe defaults.
-- [ ] Write an implementation decision record for stdio and SQLite.
+- [x] Inspect repository and instruction files.
+- [x] ~~Invoke and follow the installed Claude `/mcp-builder` skill.~~ **Not possible** — the skill
+      is not installed in this environment. Replaced by empirical SDK verification: the package was
+      installed into a throwaway environment and exercised end to end with a live in-process client,
+      producing `docs/reference/mcp-v2-verified-api.md` and the probes beside it. Stronger evidence
+      than the skill would have given, since it tests the SDK actually installed here.
+- [x] Verify the current stable MCP Python SDK and supported syntax — **`mcp` 2.0.0 is stable;
+      `FastMCP` no longer exists**. See §5.2.
+- [x] Record the selected Python and SDK versions — §5.1 table.
+- [x] Create a tool inventory with read/mutation classification — §7.1.
+- [x] Finalize entities, enums, error codes, and result models — §8, §11. `ErrorCode` is implemented
+      in `errors.py` with a test asserting the set matches this document exactly.
+- [x] Document the prohibited employment-decision behavior — §2.2, and enforced in the server
+      `INSTRUCTIONS` string, asserted by a contract test.
+- [ ] Create initial threat model — **deferred to Phase 7**, which owns the complete one. The
+      Phase 1 surface (one read-only tool, no candidate data) does not yet have threats to model
+      beyond stdout corruption and error leakage, both of which are already tested.
+- [x] Decide configuration names and safe defaults — §15, implemented in `settings.py`.
+- [x] Write an implementation decision record for stdio and SQLite — §5.2, §5.3.
 
 ### Deliverables
 
-- Architecture summary.
-- Final tool-contract table.
-- Data model.
-- Threat model.
-- Dependency plan.
-- Phase-by-phase working checklist.
+- [x] Architecture summary — §6, and README "Architecture".
+- [x] Final tool-contract table — §7.1.
+- [x] Data model — §8.
+- [ ] Threat model — Phase 7.
+- [x] Dependency plan — §5.1, locked in `uv.lock`.
+- [x] Phase-by-phase working checklist — this document, §0 for the summary.
 
 ### Completion gate
 
-- No unresolved ambiguity about candidate ranking or decision-making.
-- Every MVP tool has a defined input, output, side effect, and error set.
-- Current SDK syntax has been verified against official documentation.
+- [x] No unresolved ambiguity about candidate ranking or decision-making.
+- [x] Every MVP tool has a defined input, output, side effect, and error set.
+- [x] Current SDK syntax has been verified — **by execution, not by reading docs**.
 
 ---
 
-## Phase 1 — Project Foundation and MCP Handshake
+## Phase 1 — Project Foundation and MCP Handshake ✅
+
+**Completed August 6, 2026.**
 
 ### Objective
 
@@ -602,36 +668,71 @@ Produce an installable Python package with a working stdio MCP server.
 
 ### Tasks
 
-- [ ] Initialize `uv` package.
-- [ ] Add runtime and development dependencies.
-- [ ] Configure Ruff, Mypy, and Pytest.
-- [ ] Implement validated settings.
-- [ ] Implement stderr logging with request correlation.
-- [ ] Implement FastMCP server metadata and restrictive instructions.
-- [ ] Add `health_check`.
-- [ ] Add module and console-script entry points.
-- [ ] Add `.env.example` and `.gitignore`.
-- [ ] Add initial README commands.
-- [ ] Add MCP initialization and discovery smoke test.
+- [x] Initialize `uv` package — `pyproject.toml`, `uv.lock`, `.python-version`, hatchling backend.
+- [x] Add runtime and development dependencies — `mcp==2.0.0` exact; dev group via PEP 735.
+- [x] Configure Ruff, Mypy, and Pytest — Ruff with `DTZ`/`S`/`ANN` selected and `TC` deliberately
+      excluded (it breaks the SDK's runtime introspection); Mypy `strict = true`;
+      `asyncio_mode = "auto"`.
+- [x] Implement validated settings — `settings.py`, with database-path containment inside
+      `data_dir` including symlink resolution.
+- [x] Implement stderr logging with request correlation — `logging_config.py`, installed *before*
+      `MCPServer(...)` and stripping any pre-existing stdout handler.
+- [x] Implement ~~FastMCP~~ **`MCPServer`** metadata and restrictive instructions — `server.py`,
+      with `version=` passed explicitly because v2 defaults it to `""`.
+- [x] Add `health_check` — read-only annotations, Pydantic output model, live database probe,
+      no paths or credentials in the result.
+- [x] Add module and console-script entry points — `talent-ops-mcp` and `python -m talent_ops_mcp`.
+- [x] Add `.env.example` and `.gitignore`.
+- [x] Add initial README commands.
+- [x] Add MCP initialization and discovery smoke test — in-process contract tests plus a real
+      stdio subprocess test, which is the only coverage of JSON-RPC framing.
+- [x] **Added beyond plan:** `errors.py` — `ErrorCode` plus the `sanitized()` chokepoint. Not
+      optional: v2 hands `str(exception)` from a tool body to the client verbatim.
 
-### Tests
+### Tests — 41 passed, 1 skipped
 
-- Package imports from a clean environment.
-- Console script starts.
-- MCP client initializes successfully.
-- `health_check` is discoverable and callable.
-- No non-protocol content is emitted to stdout.
-- Missing configuration produces an actionable error.
+- [x] Package imports from a clean environment.
+- [x] Console script entry point registered and resolvable.
+- [x] MCP client initializes successfully — in-process, and over a real stdio subprocess.
+- [x] `health_check` is discoverable and callable, with correct read-only annotations and an
+      output schema.
+- [x] No non-protocol content is emitted to stdout — proved by the subprocess handshake
+      succeeding, plus an assertion that our startup log landed in the captured stderr.
+- [x] Missing configuration produces an actionable error — invalid config exits `2` with a
+      message naming the field and writes nothing to stdout.
+- [x] Both protocol eras served from one server (`mode="auto"` → 2026-07-28,
+      `mode="legacy"` → 2025-11-25).
+- [x] `health_check` result leaks no path or connection string.
+- [x] Unexpected exception messages never reach the caller; detail goes to stderr only.
+- [x] Cancellation is not swallowed by the sanitisation wrapper.
+- ⏭ *Skipped on this machine:* symlink-escape rejection — creating a symlink needs elevated
+      privileges on Windows. The non-symlink traversal and absolute-path escape cases do run.
 
-### Completion gate
+### Completion gate — all executed
 
 ```text
-ruff format/check: pass
-mypy: pass
-pytest: pass
-MCP initialize: pass
-health_check call: pass
+uv sync --all-groups   pass   48 packages
+ruff format --check .  pass   20 files
+ruff check .           pass   no findings, no broad suppressions
+mypy src tests         pass   strict, 12 files, 0 ignores in src
+pytest                 pass   41 passed, 1 skipped
+uv build               pass   sdist + wheel
+MCP initialize         pass   in-process and stdio subprocess
+health_check call      pass   status=healthy, database=connected
 ```
+
+### Findings worth carrying forward
+
+1. **An unknown tool name returns `is_error=True`; it does not raise.** Assert on results, never
+   on Python exceptions, in every later contract test.
+2. **`extra="forbid"` is asymmetric.** A typo'd key in `.env` is rejected, but a typo'd
+   `TALENT_OPS_*` shell variable is silently ignored — pydantic-settings only looks up known
+   field names in the environment. Both behaviours are now pinned by tests.
+3. **`uv` hardlinking fails under OneDrive** (`os error 396`). Fixed permanently with
+   `link-mode = "copy"` in `[tool.uv]`.
+4. **Ruff `ANN401` and Mypy disagree** about dynamically-typed test kwargs. Resolved by driving
+   invalid configuration through environment variables instead — better fidelity, zero
+   suppressions.
 
 ---
 
@@ -1071,19 +1172,25 @@ Target high behavioral coverage, not a cosmetic percentage. The following code r
 
 ---
 
-## 15. Configuration Plan
+## 15. Configuration Plan ✅ implemented
 
-Initial environment variables:
+The prefix is `TALENT_OPS_`, not `RCMCP_` (see revision 1.1). Implemented in `settings.py`;
+every bound below is enforced by a test.
 
-| Variable | Required | Default | Purpose |
-|---|---:|---|---|
-| `RCMCP_ENV` | No | `development` | Runtime environment |
-| `RCMCP_DATABASE_PATH` | No | project data directory | SQLite database path |
-| `RCMCP_LOG_LEVEL` | No | `INFO` | stderr logging level |
-| `RCMCP_PREVIEW_TTL_SECONDS` | No | `600` | Confirmation-preview expiration |
-| `RCMCP_MAX_PAGE_SIZE` | No | `50` | Maximum list result size |
-| `RCMCP_MAX_DATE_RANGE_DAYS` | No | `31` | Scheduling/report range limit |
-| `RCMCP_SLOT_INTERVAL_MINUTES` | No | `15` | Scheduling grid |
+| Variable | Required | Default | Bounds | Purpose |
+|---|---:|---|---|---|
+| `TALENT_OPS_ENV` | No | `development` | `development` / `test` / `production` | Runtime environment |
+| `TALENT_OPS_DATA_DIR` | No | `data` | must exist or be creatable | Only directory the server may touch |
+| `TALENT_OPS_DATABASE_PATH` | No | `<data_dir>/talent_ops.sqlite3` | must resolve inside `data_dir` | SQLite database path |
+| `TALENT_OPS_LOG_LEVEL` | No | `INFO` | `CRITICAL`…`DEBUG` | stderr logging level |
+| `TALENT_OPS_PREVIEW_TTL_SECONDS` | No | `600` | 30–3600 | Confirmation-preview expiration |
+| `TALENT_OPS_MAX_PAGE_SIZE` | No | `50` | 1–200 | Maximum list result size |
+| `TALENT_OPS_MAX_DATE_RANGE_DAYS` | No | `31` | 1–90 | Scheduling/report range limit |
+| `TALENT_OPS_SLOT_INTERVAL_MINUTES` | No | `15` | 5–60 | Scheduling grid |
+
+`TALENT_OPS_DATA_DIR` was added beyond the original list: containment is untestable and
+unconfigurable without an explicit root. Paths are resolved with symlinks followed, and a
+database resolving outside `data_dir` is a startup failure with exit code `2`.
 
 Future provider variables must use provider-specific prefixes and must never appear with real values in `.env.example`.
 

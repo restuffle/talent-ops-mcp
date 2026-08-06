@@ -1,0 +1,79 @@
+[project]
+name = "talent-ops-mcp"
+version = "0.1.0"
+description = "Local MCP server for recruiting coordination. Administrative logistics only; never candidate evaluation."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Ryan Stuffle" }]
+keywords = ["mcp", "recruiting", "scheduling"]
+
+# mcp is pinned exactly, not ranged: 2.0.0 is four days past GA with 15 open issues and
+# none closed (docs/reference/mcp-v2-verified-api.md §11). The lockfile plus this pin keep
+# the blast radius of an SDK change to a deliberate, reviewed bump.
+dependencies = [
+    "mcp==2.0.0",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.7",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20",
+]
+
+[project.scripts]
+talent-ops-mcp = "talent_ops_mcp.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.uv]
+# This repository lives under OneDrive, where uv's default hardlinking fails with
+# "os error 396: the cloud operation cannot be performed on a file with incompatible
+# hardlinks" during `uv build`. Copying is slightly slower and always works.
+link-mode = "copy"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/talent_ops_mcp"]
+
+# ---------------------------------------------------------------------------- ruff
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# DTZ is load-bearing here: the domain model forbids naive datetimes.
+# TC/TCH is deliberately absent -- moving annotations into TYPE_CHECKING blocks breaks
+# the runtime signature introspection that the MCP SDK and pydantic both rely on.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "DTZ", "S", "PTH", "ANN", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"] # asserts are the point of a test
+"docs/reference/probes/**" = ["ALL"] # archived verification artifacts, kept verbatim
+
+# ---------------------------------------------------------------------------- mypy
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "docs.reference.probes.*"
+ignore_errors = true
+
+# ---------------------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"

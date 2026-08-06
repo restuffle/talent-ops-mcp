@@ -1,0 +1,10 @@
+# LF everywhere, in the repository and in the working tree. Keeps diffs clean when the
+# same checkout is used from Windows and from macOS/Linux, and avoids CRLF sneaking into
+# files the tests read back byte-for-byte.
+* text=auto eol=lf
+
+# Never normalize these.
+*.sqlite3 binary
+*.png binary
+*.whl binary
+*.tar.gz binary
