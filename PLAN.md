@@ -16,8 +16,8 @@
 |---|---|---|
 | 0 — Discovery, safety, contracts | ✅ Complete | SDK verified empirically; see `docs/reference/mcp-v2-verified-api.md` |
 | 1 — Foundation and MCP handshake | ✅ Complete | All gates green: ruff, mypy, 41 passed / 1 skipped, `uv build` |
-| 2 — SQLite schema, repository, seed | ⬜ Not started | Next |
-| 3 — Read-only recruiting tools | ⬜ Not started | |
+| 2 — SQLite schema, repository, seed | ✅ Complete | 13 tables, 83-row deterministic seed; gates green: 129 passed / 1 skipped |
+| 3 — Read-only recruiting tools | ⬜ Not started | Next |
 | 4 — Deterministic scheduling engine | ⬜ Not started | |
 | 5 — Preview and confirmed scheduling | ⬜ Not started | |
 | 6 — Reporting, resources, prompts | ⬜ Not started | |
@@ -812,7 +812,7 @@ tool call              pass   talent_ops_health_check -> healthy, database=conne
 
 ---
 
-## Phase 2 — SQLite Schema, Repository, and Demo Data
+## Phase 2 — SQLite Schema, Repository, and Demo Data ✅
 
 ### Objective
 
@@ -820,31 +820,61 @@ Create a deterministic, provider-neutral data foundation.
 
 ### Tasks
 
-- [ ] Implement SQLAlchemy schema and constraints.
-- [ ] Implement database session lifecycle.
-- [ ] Define repository protocols.
-- [ ] Implement SQLite repository.
-- [ ] Implement deterministic seed command.
-- [ ] Add three jobs, twelve candidates, multiple application stages, six interviewers, skills, plans, availability, conflicts, and feedback requests.
-- [ ] Use `.test` addresses and obviously fictional identities.
-- [ ] Implement migrations or a documented schema initialization strategy.
-- [ ] Ensure the database path is restricted to the configured project data directory.
+- [x] Implement SQLAlchemy schema and constraints. — `db/schema.py`, all 13 entities of §8.1.
+- [x] Implement database session lifecycle. — `db/session.py`.
+- [x] Define repository protocols. — `repositories/protocols.py`.
+- [x] Implement SQLite repository. — `repositories/sqlite.py`.
+- [x] Implement deterministic seed command. — `scripts/seed_demo_data.py`, `db/seed.py`.
+- [x] Add three jobs, twelve candidates, multiple application stages, six interviewers, skills, plans, availability, conflicts, and feedback requests. — 83 rows; 5 stages, 37 windows, 4 interviews.
+- [x] Use `.test` addresses and obviously fictional identities.
+- [x] Implement migrations or a documented schema initialization strategy. — `create_all`; rationale and upgrade trigger in `db/session.py` and README *Schema management*.
+- [x] Ensure the database path is restricted to the configured project data directory.
 
 ### Tests
 
-- Schema creation and teardown.
-- Referential integrity.
-- Unique and status constraints.
-- Seed idempotency.
-- Repository pagination and filters.
-- Timezone-aware datetime persistence.
-- Database path boundary enforcement.
+All seven covered in `tests/integration/` (84 new tests; suite is now 129 passed / 1 skipped).
+
+- [x] Schema creation and teardown.
+- [x] Referential integrity — including a test that foreign keys are *actually enforced*, which caught a real bug (below).
+- [x] Unique and status constraints — status checks driven through raw SQL so the ORM's own validation cannot mask a missing constraint.
+- [x] Seed idempotency — plus determinism across two independent databases.
+- [x] Repository pagination and filters.
+- [x] Timezone-aware datetime persistence.
+- [x] Database path boundary enforcement.
 
 ### Completion gate
 
-- A fresh database can be initialized and seeded using one documented command.
-- Re-running the seed process is safe and deterministic.
-- Repository tests pass without MCP.
+- [x] A fresh database can be initialized and seeded using one documented command.
+- [x] Re-running the seed process is safe and deterministic.
+- [x] Repository tests pass without MCP.
+
+### Revision 1.2 notes (August 7, 2026)
+
+Four things worth recording, three of which changed the code:
+
+1. **`tzdata` is a hard dependency, and was missing.** `zoneinfo` reads the *system* tz
+   database. Windows has none, so every `ZoneInfo("America/New_York")` raised — §9.3's rule
+   that candidate time is never interpreted without an IANA zone was unsatisfiable on the
+   development machine. Added to `dependencies`, not to a Windows-only extra: slim Linux
+   containers omit tzdata too.
+2. **SQLite foreign keys were silently inert.** The first pragma listener guarded on
+   `isinstance(conn, sqlite3.Connection)`, but under `aiosqlite` the object handed to the
+   `connect` event is an `AsyncAdapt_aiosqlite_connection` wrapping an `aiosqlite.Connection`
+   — neither matches. The pragma never ran. The dialect check moved to engine construction,
+   and `test_foreign_keys_are_actually_enforced` now fails loudly if it regresses.
+3. **`server.py` builds its engine through `db.session.create_engine`.** A bare
+   `create_async_engine` in the lifespan would have skipped the pragma, giving the server an
+   engine that ignores every foreign key. It also calls `init_schema` on startup, so a fresh
+   checkout is usable rather than healthy-looking but broken.
+4. **`tests/fixtures/` (§6.2) was not created.** Its contents are pytest fixtures, which
+   belong in `conftest.py`. A second `conftest` also collides under mypy in a tree with no
+   `__init__.py`, so the database fixtures live in the existing root `tests/conftest.py`.
+
+**Deliberately deferred to the phase that specifies them:** repositories cover reads for
+jobs, candidates, applications, and interviewers. Availability and interview queries wait for
+Phase 4, where §9.2 defines their access patterns; writing them now would be guessing.
+`action_previews` and `audit_events` have tables but no seed rows — both record events that
+happened, and fabricating an audit trail would defeat its purpose.
 
 ---
 

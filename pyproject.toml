@@ -16,6 +16,11 @@ dependencies = [
     "pydantic-settings>=2.7",
     "sqlalchemy[asyncio]>=2.0.36",
     "aiosqlite>=0.20",
+    # Not optional and not Windows-only in practice. `zoneinfo` reads the *system* tz database,
+    # which Windows does not have at all and slim Linux containers routinely omit -- on both,
+    # every ZoneInfo("America/New_York") raises. §9.3 forbids interpreting a candidate's time
+    # without an IANA zone, so the tz database is a hard runtime requirement, not a convenience.
+    "tzdata>=2025.2",
 ]
 
 [project.scripts]
@@ -52,6 +57,9 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "DTZ", "S", "PTH
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"] # asserts are the point of a test
 "docs/reference/probes/**" = ["ALL"] # archived verification artifacts, kept verbatim
+# T20 bans print because the server speaks MCP over stdout. Developer CLIs are not the server:
+# they have no protocol on stdout and a summary is their whole point.
+"scripts/**" = ["T201"]
 
 # ---------------------------------------------------------------------------- mypy
 

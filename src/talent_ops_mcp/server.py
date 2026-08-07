@@ -18,9 +18,10 @@ from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from talent_ops_mcp import __version__
+from talent_ops_mcp.db.session import create_engine, init_schema
 from talent_ops_mcp.errors import sanitized
 from talent_ops_mcp.settings import Settings
 
@@ -138,8 +139,12 @@ def build_server(settings: Settings) -> MCPServer[AppState]:
 
     @asynccontextmanager
     async def lifespan(server: MCPServer[AppState]) -> AsyncIterator[AppState]:
-        settings.data_dir.mkdir(parents=True, exist_ok=True)
-        engine = create_async_engine(settings.database_url)
+        # Built through db.session so the foreign-key pragma is attached; a bare
+        # create_async_engine here would give the server an engine that silently ignores every
+        # ForeignKey in the schema. init_schema is idempotent, so a fresh checkout starts with a
+        # usable database rather than a healthy-looking server whose every tool fails.
+        engine = create_engine(settings)
+        await init_schema(engine)
         # Deliberately no database_url here -- it embeds a filesystem path.
         _log.info(
             "startup server=%s version=%s env=%s sdk=%s",

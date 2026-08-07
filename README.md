@@ -49,6 +49,45 @@ uv sync --all-groups
 `uv sync` creates `.venv`, installs the pinned dependencies from `uv.lock`, and installs
 this package in editable mode.
 
+## Seed the demo database
+
+One command creates the database and fills it with fictional demo data:
+
+```powershell
+uv run python scripts/seed_demo_data.py
+```
+
+Safe to re-run — rows are merged by primary key, so a second run converges on the same state
+rather than duplicating. That also makes it the way to **restore** demo data you have edited.
+
+| Flag | Effect |
+|---|---|
+| *(none)* | Create the schema if missing, then seed the fixed reference week (2026-09-07). |
+| `--anchor now` | Same dataset, shifted so the interview slots fall in the current week. |
+| `--anchor YYYY-MM-DD` | Same dataset, anchored to a specific Monday. |
+| `--reset` | Drop every table first. Destroys all local data, seeded or not. |
+
+The default anchor is fixed so tests are reproducible; `--anchor now` is for live demos, where
+a dataset whose slots are all in the past demonstrates nothing. Every instant shifts by the
+same offset, so relative spacing is preserved.
+
+The seeded dataset is 83 rows: 3 jobs, 12 candidates, 12 applications across 5 pipeline
+stages, 7 interview plans (one deliberately superseded), 6 interviewers (one inactive), 37
+availability windows, 4 interviews (scheduled, completed, and cancelled), and 2 feedback
+requests. Every identity is invented and every address uses the reserved `.test` TLD, which
+cannot resolve — a demo seed must not be able to email a real person.
+
+### Schema management
+
+There is no migration tool. `create_all` runs on server startup and in the seed script, and
+is idempotent. This is the documented strategy §12 permits: the database is a local
+single-file store holding nothing but fictional demo data, so there is nothing for a
+migration to preserve, and Alembic would add a second source of schema truth to keep in step
+by hand. That trade flips at Phase 11, when a deployment first holds data someone would miss.
+
+`create_all` creates missing tables; it does **not** alter existing ones. After changing a
+column, re-run with `--reset`.
+
 ## Run the server
 
 The server speaks MCP over **stdio**. It is not interesting to run by hand — an MCP client
@@ -144,19 +183,41 @@ transaction logic.
 ### Current files
 
 ```text
+scripts/
+└── seed_demo_data.py    one-command database init + demo seed
 src/talent_ops_mcp/
 ├── __init__.py          package version
 ├── __main__.py          console script + `python -m` entrypoint
 ├── server.py            MCPServer construction, lifespan, health_check
 ├── settings.py          validated TALENT_OPS_* configuration
 ├── logging_config.py    stderr-only logging
-└── errors.py            stable error codes + the sanitisation chokepoint
+├── errors.py            stable error codes + the sanitisation chokepoint
+├── models/
+│   └── domain.py        closed status/stage vocabularies (become CHECK constraints)
+├── db/
+│   ├── base.py          declarative base, UTC datetime type, enum + naming conventions
+│   ├── schema.py        the 13 tables and their constraints
+│   ├── session.py       engine factory, SQLite pragmas, schema init, transaction scope
+│   └── seed.py          deterministic, idempotent demo dataset
+└── repositories/
+    ├── protocols.py     what the service layer may ask of storage
+    └── sqlite.py        the only implementation today; paginated, read-only
 tests/
-├── conftest.py
+├── conftest.py          config isolation + database fixtures
 ├── unit/                settings, errors, logging
 ├── contract/            in-process MCP client against the real server
+├── integration/         schema constraints, seed properties, repository queries
 └── test_mcp_smoke.py    real stdio subprocess (the only framing coverage)
 ```
+
+Two invariants are enforced centrally rather than per-caller, because "enforced in every
+caller" is the same as "not enforced":
+
+- **Datetimes are timezone-aware UTC.** `UtcDateTime` refuses to persist a naive one. SQLite
+  has no aware type and silently drops offsets, so a value written as `09:00-04:00` would
+  otherwise read back as bare `09:00`.
+- **Foreign keys are on.** SQLite ships with them *off*; `create_engine` attaches a
+  `PRAGMA foreign_keys=ON` listener, without which every `ForeignKey` is inert decoration.
 
 ## SDK version and transport
 
@@ -175,7 +236,7 @@ tests/
 uv sync --all-groups
 uv run ruff format --check .
 uv run ruff check .
-uv run mypy src tests
+uv run mypy src tests scripts
 uv run python -m pytest
 uv build
 ```
@@ -202,8 +263,15 @@ Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) w
 
 ## Known limitations
 
-- **No recruiting data yet.** Phase 1 delivers the foundation only; the schema, seed, and
-  every recruiting tool are Phases 2–6.
+- **Data, but no tools over it yet.** Phase 2 delivers the schema, repositories, and seed.
+  `health_check` is still the only MCP tool; the recruiting tools are Phases 3–6.
+- **Repositories cover reads only, for four entities.** Jobs, candidates, applications, and
+  interviewers. Availability and interview queries arrive with the scheduling engine in
+  Phase 4, which is where their access patterns are actually specified.
+- **`create_all`, not migrations.** Schema changes need `--reset`; see *Schema management*.
+- **Legacy timezone aliases are accepted.** `EST`, `MST`, and `HST` are real IANA entries so
+  the validator passes them, but they carry no daylight saving — `EST` is UTC-5 even in July.
+  Prefer `America/New_York`. Nothing in the code can catch this.
 - **Fictional data by design.** The MVP is SQLite with `.test` identities. No ATS, calendar,
   or email integration, and none is planned before Phases 9–10.
 - **Single local user.** There is no authentication. Remote multi-user operation is Phase 11
