@@ -17,8 +17,8 @@
 | 0 — Discovery, safety, contracts | ✅ Complete | SDK verified empirically; see `docs/reference/mcp-v2-verified-api.md` |
 | 1 — Foundation and MCP handshake | ✅ Complete | All gates green: ruff, mypy, 41 passed / 1 skipped, `uv build` |
 | 2 — SQLite schema, repository, seed | ✅ Complete | 13 tables, 83-row deterministic seed; gates green: 129 passed / 1 skipped |
-| 3 — Read-only recruiting tools | ⬜ Not started | Next |
-| 4 — Deterministic scheduling engine | ⬜ Not started | |
+| 3 — Read-only recruiting tools | ✅ Complete | 4 read tools, cursor pagination; gates green: 230 passed / 1 skipped, `uv build` |
+| 4 — Deterministic scheduling engine | ⬜ Not started | Next |
 | 5 — Preview and confirmed scheduling | ⬜ Not started | |
 | 6 — Reporting, resources, prompts | ⬜ Not started | |
 | 7 — Security and quality hardening | ⬜ Not started | |
@@ -266,7 +266,7 @@ talent-ops-mcp/
 ├── .env.example                         ✅
 ├── .gitignore                           ✅
 ├── scripts/
-│   └── seed_demo_data.py                    Phase 2
+│   └── seed_demo_data.py             ✅
 ├── src/
 │   └── talent_ops_mcp/
 │       ├── __init__.py                  ✅
@@ -275,19 +275,20 @@ talent-ops-mcp/
 │       ├── settings.py                  ✅
 │       ├── logging_config.py            ✅
 │       ├── errors.py                    ✅
-│       ├── models/                           Phase 2-3  domain, inputs, outputs
-│       ├── db/                               Phase 2     base, schema, session, seed
-│       ├── repositories/                     Phase 2     protocols, sqlite
-│       ├── services/                         Phase 3-5   recruiting, scheduling, confirmation, audit
-│       ├── tools/                            Phase 3-6   jobs, candidates, interviews, reporting
+│       ├── models/                      ✅   domain, outputs (no `inputs`: see Phase 3 notes)
+│       ├── db/                          ✅   base, schema, session, seed
+│       ├── repositories/                ✅   protocols, sqlite
+│       ├── services/                    ✅   pagination, recruiting; scheduling + confirmation Phase 4-5
+│       ├── tools/                       ✅   recruiting; reporting Phase 6
 │       ├── resources/                        Phase 6     policies, templates
 │       └── prompts/                          Phase 6     workflows
 └── tests/
     ├── conftest.py                       ✅
-    ├── unit/                             ✅  settings, errors, logging
+    ├── unit/                             ✅  settings, errors, logging, pagination
     ├── contract/                         ✅  in-process MCP client
-    ├── integration/                          Phase 2
-    ├── fixtures/                             Phase 2
+    ├── integration/                      ✅  schema, seed, repositories, recruiting service
+    ├── fixtures/                             not created — its contents are pytest fixtures,
+    │                                         which belong in conftest.py (Revision 1.2 note 4)
     └── test_mcp_smoke.py                 ✅  real stdio subprocess
 ```
 
@@ -316,10 +317,10 @@ tool, so a later phase cannot reintroduce an unprefixed name.
 | Tool | Phase | Type | Purpose |
 |---|---:|---|---|
 | `talent_ops_health_check` | 1 ✅ | Read | Confirm server readiness and report non-sensitive version information |
-| `talent_ops_search_jobs` | 3 | Read | Search open or closed jobs using bounded filters |
-| `talent_ops_list_applications` | 3 | Read | List applications by job, stage, status, or scheduling need |
-| `talent_ops_get_candidate` | 3 | Read | Retrieve one candidate and relevant application context |
-| `talent_ops_get_interview_plan` | 3 | Read | Retrieve approved duration, panel, skill, and scheduling rules |
+| `talent_ops_search_jobs` | 3 ✅ | Read | Search open or closed jobs using bounded filters |
+| `talent_ops_list_applications` | 3 ✅ | Read | List applications by job, stage, status, or scheduling need |
+| `talent_ops_get_candidate` | 3 ✅ | Read | Retrieve one candidate and relevant application context |
+| `talent_ops_get_interview_plan` | 3 ✅ | Read | Retrieve approved duration, panel, skill, and scheduling rules |
 | `talent_ops_propose_interview_slots` | 4 | Compute/read | Calculate compatible slots without changing state |
 | `talent_ops_preview_interview_schedule` | 5 | Local preview | Create an exact, expiring proposal and confirmation token |
 | `talent_ops_confirm_interview_schedule` | 5 | Mutation | Atomically create one interview from an unchanged valid preview |
@@ -878,7 +879,7 @@ happened, and fabricating an audit trail would defeat its purpose.
 
 ---
 
-## Phase 3 — Read-Only Recruiting Tools
+## Phase 3 — Read-Only Recruiting Tools ✅
 
 ### Objective
 
@@ -886,35 +887,107 @@ Expose useful recruiting context without state changes.
 
 ### Tasks
 
-- [ ] Implement recruiting service.
-- [ ] Implement `talent_ops_search_jobs`.
-- [ ] Implement `talent_ops_list_applications`.
-- [ ] Implement `talent_ops_get_candidate`.
-- [ ] Implement `talent_ops_get_interview_plan`.
-- [ ] Add typed Pydantic inputs and outputs.
-- [ ] Add bounded pagination returning `total`, `count`, `has_more`, and `next_cursor` — see
+- [x] Implement recruiting service. `services/recruiting.py` — `RecruitingService`, whose four
+      repository fields are typed as the *protocols*, so mypy structurally checks each
+      `Sqlite*Repository` against its contract at the `sqlite_recruiting_service` factory.
+- [x] Implement `talent_ops_search_jobs`.
+- [x] Implement `talent_ops_list_applications`.
+- [x] Implement `talent_ops_get_candidate`.
+- [x] Implement `talent_ops_get_interview_plan`.
+- [x] Add typed Pydantic inputs and outputs. Outputs in `models/outputs.py`. Inputs are
+      `Annotated[T, Field(...)]` parameters rather than a `models/inputs.py` (see notes below).
+- [x] Add bounded pagination returning `total`, `count`, `has_more`, and `next_cursor` — see
       §7.1.1. Bare items-plus-cursor is not enough; the model needs to know whether to keep going.
-- [ ] Add safe not-found and validation errors.
-- [ ] Ensure returned fields follow least-data principles.
-- [ ] Add tool descriptions stating when each tool should and should not be used.
+- [x] Add safe not-found and validation errors.
+- [x] Ensure returned fields follow least-data principles.
+- [x] Add tool descriptions stating when each tool should and should not be used.
 
-### Tests
+### Tests — 230 passed, 1 skipped
 
-- Search by title and status.
-- Filter applications by job, stage, and scheduling need.
-- Retrieve one candidate with only relevant application context.
-- Unknown and malformed identifiers.
-- Zero results.
-- Maximum page size.
-- Stable structured-output schemas.
-- No protected-trait or ranking fields.
-- MCP tool calls through a client session.
+- [x] Search by title and status.
+- [x] Filter applications by job, stage, and scheduling need.
+- [x] Retrieve one candidate with only relevant application context.
+- [x] Unknown and malformed identifiers.
+- [x] Zero results.
+- [x] Maximum page size.
+- [x] Stable structured-output schemas.
+- [x] No protected-trait or ranking fields — asserted against every registered tool's
+      `output_schema`, so a later phase cannot add one quietly.
+- [x] MCP tool calls through a client session.
 
-### Completion gate
+### Completion gate — met
 
 The following natural-language request can be completed through discovered tools:
 
 > Find open Backend Engineer jobs and show active applications awaiting a technical interview.
+
+Asserted end to end in `test_the_phase_3_completion_gate`. The demo dataset has no "Backend
+Engineer"; the open engineering role is Senior Platform Engineer and the one technical screen
+still needing arranging is on the QA job. Both are truthful answers, and reaching them —
+including the follow-up read of that stage's approved plan — needs no tool that does not exist.
+
+### Revision 1.3 notes (August 7, 2026)
+
+Six decisions worth recording. The first was not about this codebase at all.
+
+1. **Smart App Control broke the toolchain, and `.python-version` moved to 3.12.** After a
+   machine crash mid-phase, every `python` invocation exited `0xC0E90002` with no output — which
+   looked exactly like a silently passing test suite. The cause was Windows Smart App Control
+   turning on and blocking `python311.dll`, which is unsigned because uv installs
+   python-build-standalone (`CodeIntegrity/Operational` event 3077 names the DLL). Reinstalling
+   did not help; SAC cannot be re-enabled once disabled, so the venv was rebuilt on the signed
+   python.org 3.12.10 already on the machine. `requires-python` is `>=3.11`, and ruff
+   (`target-version = "py311"`) and mypy (`python_version = "3.11"`) still hold the code to 3.11,
+   so nothing 3.12-only can creep in. **Lesson worth keeping: a test command that prints nothing
+   is not a passing test command.**
+2. **The mypy override for the archived probes never matched anything.** `[[tool.mypy.overrides]]
+   module = "docs.reference.probes.*"` cannot match files in a tree with no `__init__.py` — mypy
+   names them by basename — so `mypy .` had been strict-checking the probes all along. Replaced
+   with a path-based `exclude`. This was pre-existing and unrelated to Phase 3; it only became
+   visible when the interpreter changed.
+3. **`tools/` was created; `talent_ops_health_check` did not move.** §6.2 anticipated relocating
+   it "once Phase 3 gives it company". It reports on the server rather than on recruiting data,
+   needs no session, and moving a working tested tool is churn with nothing behind it. It stays
+   in `server.py`, which is now purely metadata, lifespan, and registration.
+4. **No `models/inputs.py`.** A request model per tool would nest every parameter one level deep
+   in the advertised `input_schema`, which is worse for the model than flat named arguments. The
+   typed inputs are `Annotated[T, Field(...)]` parameters, verified to produce identical schemas
+   to the `= Field(...)` form (and, unlike it, not flagged as a mutable argument default).
+   §6.2's own rule against modules that exist only to match the diagram applies.
+5. **The advertised `limit` maximum is read from `Settings` at registration.** A schema
+   promising 50 on a server configured for 5 is a lie the model has no way to detect; its request
+   would simply be clamped.
+6. **`build_server` imports the tool adapters inside the function.** The adapters need
+   `AppState`, `app_state`, and `TOOL_PREFIX` from `server.py`, so a module-level import either
+   way round is a cycle. One deferred import at the composition root is the smaller fix.
+
+### Review findings, and the one that mattered
+
+An adversarial review pass over the finished diff produced three changes:
+
+1. **A transposition test that did not exist.** A reviewer silently swapped `department` and
+   `location` in the `JobSummary` construction — two `str` fields, adjacent — and the whole suite
+   stayed green. Worse, deleting both fields from the model *also* stayed green, because pydantic
+   ignores unknown keyword arguments by default, so the service kept passing values into a model
+   that no longer had anywhere to put them. Nothing asserted on either value. Fixed by asserting
+   every field of `JobSummary`, `ApplicationSummary`, and `CandidateDetail` against known seed
+   values. **The general lesson: same-typed adjacent fields need value assertions, not just a
+   schema test — the type checker, the schema, and the tool contract all pass a transposition.**
+2. **`cursor` had no `max_length`,** while the module docstring claimed every parameter was
+   bounded. A 100 kB cursor was accepted by the SDK and handed to `base64.urlsafe_b64decode`
+   before being rejected. Now bounded at `CURSOR_MAX_LENGTH`.
+3. **An overstatement corrected.** `pagination.py` claimed a reflected cursor would be "the one
+   place a tool response can be made to carry attacker-chosen text". The not-found errors echo
+   identifiers, deliberately and per §7.1.1, so that was not true. The docstring now states the
+   actual reason the cursor path refuses to echo: reflecting a cursor buys nothing, which makes
+   refusing free. Note also that pydantic's own schema-level rejections quote the rejected input;
+   that is SDK behaviour, bounded by `max_length`, and not something this project controls.
+
+**Deliberately deferred:** `awaiting_scheduling` is derived on every read rather than stored, so
+Phases 4-5 get it right for free when interviews start being written — but nothing yet *writes*
+an interview, so the "a booking clears the flag" path is proved only by the seed's already-booked
+rows. The offset-backed cursor stays offset-backed; see `services/pagination.py` for the keyset
+upgrade and the point (a live ATS, Phases 9-10) at which it stops being over-engineering.
 
 ---
 

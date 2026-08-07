@@ -11,14 +11,23 @@ follows every sort key. Without it SQLite may return rows in any order for equal
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import ColumnElement, Select, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talent_ops_mcp.db.base import Base
-from talent_ops_mcp.db.schema import Application, Candidate, Interviewer, InterviewerSkill, Job
+from talent_ops_mcp.db.schema import (
+    Application,
+    Candidate,
+    Interview,
+    Interviewer,
+    InterviewerSkill,
+    InterviewPlan,
+    InterviewPlanSkillRequirement,
+    Job,
+)
 from talent_ops_mcp.errors import DomainError, ErrorCode
-from talent_ops_mcp.models.domain import ApplicationStatus, JobStatus, Stage
-from talent_ops_mcp.repositories.protocols import Page
+from talent_ops_mcp.models.domain import ApplicationStatus, InterviewStatus, JobStatus, Stage
+from talent_ops_mcp.repositories.protocols import ActivePlan, ApplicationSummaryRow, Page
 
 _ModelT = TypeVar("_ModelT", bound=Base)
 
@@ -57,6 +66,16 @@ class _Repository:
             raise DomainError(ErrorCode.VALIDATION_ERROR, f"offset cannot be negative, got {offset}")
         return offset
 
+    async def _count(self, statement: Select[Any]) -> int:
+        """Rows ``statement`` would return, ignoring its window.
+
+        Counting via a subquery of the filtered statement rather than rebuilding the filters keeps
+        the two in step -- a filter added to one and forgotten in the other would produce a
+        ``total`` that disagrees with ``items`` and a ``has_more`` that lies.
+        """
+        counted = select(func.count()).select_from(statement.order_by(None).subquery())
+        return int((await self._session.execute(counted)).scalar_one())
+
     async def _paginate(
         self,
         statement: Select[tuple[_ModelT]],
@@ -65,20 +84,11 @@ class _Repository:
         limit: int,
         offset: int,
     ) -> Page[_ModelT]:
-        """Run ``statement`` twice: once counted, once windowed.
-
-        Counting via a subquery of the filtered statement rather than rebuilding the filters
-        keeps the two in step -- a filter added to one and forgotten in the other would produce a
-        ``total`` that disagrees with ``items`` and a ``has_more`` that lies.
-        """
+        """Run ``statement`` twice: once counted, once windowed."""
         effective = self._effective_limit(limit)
         offset = self._check_offset(offset)
 
-        total = int(
-            (
-                await self._session.execute(select(func.count()).select_from(statement.order_by(None).subquery()))
-            ).scalar_one()
-        )
+        total = await self._count(statement)
         rows = (
             (await self._session.execute(statement.order_by(*order_by).limit(effective).offset(offset))).scalars().all()
         )
@@ -97,12 +107,23 @@ class SqliteJobRepository(_Repository):
     async def list(
         self,
         *,
+        query: str | None = None,
         status: JobStatus | None = None,
         department: str | None = None,
         limit: int = 25,
         offset: int = 0,
     ) -> Page[Job]:
+        """Filter by free-text title, status, and department.
+
+        ``query`` matches the title only. Searching the department and location text too was
+        considered and rejected: "Engineering" would then match every role in the department as
+        well as every role with the word in its title, and a caller who wanted the department has
+        an exact filter for it.
+        """
         statement = select(Job)
+        if query:
+            pattern = f"%{_escape_like(query.strip().lower())}%"
+            statement = statement.where(func.lower(Job.title).like(pattern, escape=_LIKE_ESCAPE))
         if status is not None:
             statement = statement.where(Job.status == status)
         if department is not None:
@@ -145,34 +166,205 @@ class SqliteCandidateRepository(_Repository):
         )
 
 
+def _awaiting_scheduling() -> ColumnElement[bool]:
+    """True when an application needs coordination work.
+
+    Three conditions, all required: the application is active, its current stage has an *approved*
+    plan, and no interview is currently on the calendar for it. Derived on every read rather than
+    stored, so confirming an interview flips it with no second write to keep in step -- see
+    :class:`~talent_ops_mcp.repositories.protocols.ApplicationRepository`.
+
+    The interview check is not narrowed to the current stage's plan. An application with any
+    scheduled interview at all is one a coordinator has already touched, and treating it as
+    outstanding would put it back on a worklist that exists to surface *untouched* work. A
+    cancelled interview does not count, which is what makes a cancellation resurface the row.
+    """
+    plan_approved = (
+        select(1)
+        .select_from(InterviewPlan)
+        .where(
+            InterviewPlan.job_id == Application.job_id,
+            InterviewPlan.stage == Application.current_stage,
+            InterviewPlan.active.is_(True),
+        )
+        .exists()
+    )
+    already_booked = (
+        select(1)
+        .select_from(Interview)
+        .where(
+            Interview.application_id == Application.id,
+            Interview.status == InterviewStatus.SCHEDULED,
+        )
+        .exists()
+    )
+    return and_(Application.status == ApplicationStatus.ACTIVE, plan_approved, ~already_booked)
+
+
 class SqliteApplicationRepository(_Repository):
     """Reads over :class:`~talent_ops_mcp.db.schema.Application`."""
 
     async def get(self, application_id: str) -> Application | None:
         return await self._get(Application, application_id)
 
-    async def list(
-        self,
+    @staticmethod
+    def _filtered(
+        statement: Select[Any],
         *,
-        job_id: str | None = None,
-        stage: Stage | None = None,
-        status: ApplicationStatus | None = None,
-        limit: int = 25,
-        offset: int = 0,
-    ) -> Page[Application]:
-        statement = select(Application)
+        job_id: str | None,
+        candidate_id: str | None,
+        stage: Stage | None,
+        status: ApplicationStatus | None,
+        awaiting_scheduling: bool | None,
+    ) -> Select[Any]:
+        """Apply the shared filter set.
+
+        Both :meth:`list` and :meth:`list_summaries` route through here so the two can never drift
+        into answering the same question differently -- which would show a coordinator one count in
+        a summary and another in a detail read.
+        """
         if job_id is not None:
             statement = statement.where(Application.job_id == job_id)
+        if candidate_id is not None:
+            statement = statement.where(Application.candidate_id == candidate_id)
         if stage is not None:
             statement = statement.where(Application.current_stage == stage)
         if status is not None:
             statement = statement.where(Application.status == status)
+        if awaiting_scheduling is not None:
+            needs = _awaiting_scheduling()
+            statement = statement.where(needs if awaiting_scheduling else ~needs)
+        return statement
+
+    async def list(
+        self,
+        *,
+        job_id: str | None = None,
+        candidate_id: str | None = None,
+        stage: Stage | None = None,
+        status: ApplicationStatus | None = None,
+        awaiting_scheduling: bool | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> Page[Application]:
+        statement = self._filtered(
+            select(Application),
+            job_id=job_id,
+            candidate_id=candidate_id,
+            stage=stage,
+            status=status,
+            awaiting_scheduling=awaiting_scheduling,
+        )
         return await self._paginate(
             statement,
             order_by=(Application.last_activity_at.desc(), Application.id),
             limit=limit,
             offset=offset,
         )
+
+    async def list_summaries(
+        self,
+        *,
+        job_id: str | None = None,
+        candidate_id: str | None = None,
+        stage: Stage | None = None,
+        status: ApplicationStatus | None = None,
+        awaiting_scheduling: bool | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> Page[ApplicationSummaryRow]:
+        """The same rows as :meth:`list`, joined to the candidate and job names.
+
+        Both joins are inner: ``candidate_id`` and ``job_id`` are non-nullable foreign keys with
+        the pragma enforced, so a row with no match cannot exist. An outer join would only add a
+        ``None`` branch for a state the database forbids.
+        """
+        statement = self._filtered(
+            select(
+                Application.id,
+                Application.candidate_id,
+                Candidate.first_name,
+                Candidate.last_name,
+                Application.job_id,
+                Job.title,
+                Application.current_stage,
+                Application.status,
+                _awaiting_scheduling().label("awaiting_scheduling"),
+                Application.last_activity_at,
+            )
+            .join(Candidate, Candidate.id == Application.candidate_id)
+            .join(Job, Job.id == Application.job_id),
+            job_id=job_id,
+            candidate_id=candidate_id,
+            stage=stage,
+            status=status,
+            awaiting_scheduling=awaiting_scheduling,
+        )
+
+        effective = self._effective_limit(limit)
+        offset = self._check_offset(offset)
+        total = await self._count(statement)
+        windowed = (
+            statement.order_by(Application.last_activity_at.desc(), Application.id).limit(effective).offset(offset)
+        )
+        rows = (await self._session.execute(windowed)).all()
+
+        return Page(
+            items=tuple(
+                ApplicationSummaryRow(
+                    id=row.id,
+                    candidate_id=row.candidate_id,
+                    candidate_name=f"{row.first_name} {row.last_name}",
+                    job_id=row.job_id,
+                    job_title=row.title,
+                    current_stage=row.current_stage,
+                    status=row.status,
+                    # SQLite has no boolean type; the EXISTS arithmetic comes back as 0 or 1.
+                    awaiting_scheduling=bool(row.awaiting_scheduling),
+                    last_activity_at=row.last_activity_at,
+                )
+                for row in rows
+            ),
+            total=total,
+            limit=effective,
+            offset=offset,
+        )
+
+
+class SqliteInterviewPlanRepository(_Repository):
+    """Reads over :class:`~talent_ops_mcp.db.schema.InterviewPlan`."""
+
+    async def get_active(self, job_id: str, stage: Stage) -> ActivePlan | None:
+        """The single active plan for a (job, stage), with its skill requirements.
+
+        ``active`` is filtered in SQL rather than checked after the fetch: the partial unique index
+        guarantees at most one active row per pair, so this returns one plan or nothing without a
+        tiebreak. Superseded plans stay in the table and stay invisible here.
+        """
+        plan = (
+            await self._session.execute(
+                select(InterviewPlan).where(
+                    InterviewPlan.job_id == job_id,
+                    InterviewPlan.stage == stage,
+                    InterviewPlan.active.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if plan is None:
+            return None
+
+        requirements = (
+            (
+                await self._session.execute(
+                    select(InterviewPlanSkillRequirement)
+                    .where(InterviewPlanSkillRequirement.interview_plan_id == plan.id)
+                    .order_by(InterviewPlanSkillRequirement.skill_code)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return ActivePlan(plan=plan, requirements=tuple(requirements))
 
 
 class SqliteInterviewerRepository(_Repository):

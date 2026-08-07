@@ -67,10 +67,12 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "DTZ", "S", "PTH
 python_version = "3.11"
 strict = true
 warn_unreachable = true
-
-[[tool.mypy.overrides]]
-module = "docs.reference.probes.*"
-ignore_errors = true
+# Path-based, not a module override. `docs/reference/probes/` has no `__init__.py`, so mypy names
+# those files by basename (`e2e_probe`) and a `module = "docs.reference.probes.*"` override never
+# matched a single one -- the archived probes were being strict-checked all along. They are kept
+# verbatim as the evidence behind docs/reference/mcp-v2-verified-api.md; editing them to satisfy a
+# type checker would falsify the record. ruff excludes the same tree for the same reason.
+exclude = ["^docs/reference/probes/"]
 
 # ---------------------------------------------------------------------------- pytest
 

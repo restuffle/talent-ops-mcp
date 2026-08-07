@@ -49,8 +49,9 @@ async def test_health_check_is_discoverable_with_read_only_hints(settings: Setti
     async with Client(build_server(settings)) as client:
         listed = await client.list_tools()
 
-        assert {t.name for t in listed.tools} == {HEALTH_CHECK}
-        tool = listed.tools[0]
+        # Looked up by name, not by index: Phase 3 registered four more tools and list order is
+        # not part of the contract.
+        tool = next(t for t in listed.tools if t.name == HEALTH_CHECK)
         assert tool.output_schema is not None
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
@@ -59,15 +60,17 @@ async def test_health_check_is_discoverable_with_read_only_hints(settings: Setti
         assert tool.annotations.open_world_hint is False
 
 
-async def test_health_check_description_says_when_not_to_use_it(settings: Settings) -> None:
-    """mcp-builder requires descriptions that steer the model away from misuse, not just toward use."""
+async def test_every_tool_description_says_when_not_to_use_it(settings: Settings) -> None:
+    """mcp-builder requires descriptions that steer the model away from misuse, not just toward
+    use. §7.1.1 makes it binding on every tool, so this asserts on all of them rather than only
+    the one that happened to exist in Phase 1."""
     async with Client(build_server(settings)) as client:
         listed = await client.list_tools()
 
-    description = listed.tools[0].description
-    assert description is not None
-    assert "Use when:" in description
-    assert "Do not use:" in description
+    for tool in listed.tools:
+        assert tool.description is not None, tool.name
+        assert "Use when:" in tool.description, tool.name
+        assert "Do not use:" in tool.description, tool.name
 
 
 async def test_health_check_reports_healthy_against_a_real_database(settings: Settings) -> None:
@@ -137,7 +140,7 @@ async def test_both_protocol_eras_are_served(settings: Settings, mode: str) -> N
         listed = await client.list_tools()
         result = await client.call_tool(HEALTH_CHECK, {})
 
-    assert {t.name for t in listed.tools} == {HEALTH_CHECK}
+    assert HEALTH_CHECK in {t.name for t in listed.tools}
     assert result.is_error is False
 
 

@@ -37,7 +37,15 @@ async def test_stdio_subprocess_handshake_and_health_check(tmp_path: Path, subpr
 
     assert init.server_info.name == SERVER_NAME
     assert init.server_info.version
-    assert {t.name for t in listed.tools} == {HEALTH_CHECK}
+    # Every tool survives real JSON-RPC framing, not just the one this test calls: a schema the
+    # SDK cannot serialize would break `tools/list` for all of them at once.
+    assert {t.name for t in listed.tools} == {
+        HEALTH_CHECK,
+        f"{TOOL_PREFIX}_search_jobs",
+        f"{TOOL_PREFIX}_list_applications",
+        f"{TOOL_PREFIX}_get_candidate",
+        f"{TOOL_PREFIX}_get_interview_plan",
+    }
     assert result.is_error is False
     assert result.structured_content is not None
     assert result.structured_content["status"] == "healthy"

@@ -110,3 +110,23 @@ async def seeded_session(session_factory: async_sessionmaker[AsyncSession]) -> A
         await seed(open_session)
         await open_session.commit()
         yield open_session
+
+
+@pytest.fixture
+async def seeded_settings(settings: Settings) -> Settings:
+    """Settings whose database file already holds the demo dataset.
+
+    For the contract tests, which drive a real ``build_server(settings)``: that server builds its
+    *own* engine in its lifespan, so seeding through the ``seeded_session`` fixture would populate
+    a different connection pool over the same file and, on Windows, hold a handle the server then
+    has to contend with. This seeds and disposes first, leaving only a file behind.
+    """
+    engine = create_engine(settings)
+    try:
+        await init_schema(engine)
+        async with create_session_factory(engine)() as open_session:
+            await seed(open_session)
+            await open_session.commit()
+    finally:
+        await engine.dispose()
+    return settings

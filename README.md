@@ -5,10 +5,11 @@ assistant coordinate recruiting **logistics** — finding jobs and applications,
 compatible interview times, and creating interviews after a human confirms the exact
 proposed action.
 
-> **Status: Phase 1 of 11 complete.** The package installs, the stdio server starts, an MCP
-> client connects, and `health_check` works. The recruiting data model, tools, scheduling
-> engine, resources and prompts land in Phases 2–6. See [PLAN.md](PLAN.md) for the checklist
-> and [docs/reference/mcp-v2-verified-api.md](docs/reference/mcp-v2-verified-api.md) for the
+> **Status: Phase 3 of 11 complete.** The package installs, the stdio server starts, an MCP
+> client connects, and five read-only tools answer real recruiting questions over a seeded
+> SQLite database. The scheduling engine, the preview/confirm protocol, resources and prompts
+> land in Phases 4–6. See [PLAN.md](PLAN.md) for the checklist and
+> [docs/reference/mcp-v2-verified-api.md](docs/reference/mcp-v2-verified-api.md) for the
 > verified SDK behaviour every phase is written against.
 
 ## The boundary
@@ -34,7 +35,10 @@ as untrusted data. Instructions embedded in it have no authority over server rul
 
 ## Prerequisites
 
-- **Python 3.11+** — 3.11.15 is what this is developed and verified against
+- **Python 3.11+** — 3.12.10 is what this is currently developed and verified against. `ruff`
+  (`target-version = "py311"`) and `mypy` (`python_version = "3.11"`) still hold the code to
+  3.11, so nothing 3.12-only can creep in. The switch was forced by Windows Smart App Control,
+  which blocks uv's unsigned Python — see *Troubleshooting*.
 - **[uv](https://docs.astral.sh/uv/)** 0.11+ — dependency and environment management
 - Node.js only if you want to run MCP Inspector (Phase 8)
 
@@ -136,13 +140,24 @@ the same client.
 | Tool | Type | State | Purpose |
 |---|---|---|---|
 | `talent_ops_health_check` | Read | None | Server version, environment, and a live database probe. No paths or credentials. |
+| `talent_ops_search_jobs` | Read | None | Requisitions by title text, status, or department. Paginated. |
+| `talent_ops_list_applications` | Read | None | Applications by job, candidate, stage, status, or scheduling need. Paginated. |
+| `talent_ops_get_candidate` | Read | None | One candidate by id, with contact details, timezone, and pipeline context. |
+| `talent_ops_get_interview_plan` | Read | None | The approved duration, panel, buffers, lead time, and skills for one (job, stage). |
 
-Phases 3–6 add `talent_ops_search_jobs`, `talent_ops_list_applications`,
-`talent_ops_get_candidate`, `talent_ops_get_interview_plan`,
-`talent_ops_propose_interview_slots`, `talent_ops_preview_interview_schedule`,
+Every list tool returns `total`, `count`, `has_more`, and `next_cursor` — not just items and a
+cursor, so the model can tell a partial answer from a complete one without paging to exhaustion.
+Cursors are opaque; construct or edit one and the call is refused rather than reinterpreted.
+
+`talent_ops_get_candidate` is the only tool that returns an email address or phone number, and it
+is reachable only by exact id. There is no bulk read of contact details, and no output schema
+anywhere carries a score, rating, rank, or anything else that could be read as a judgement about
+a person — a contract test asserts that against every registered tool.
+
+Phases 4–6 add `talent_ops_propose_interview_slots`, `talent_ops_preview_interview_schedule`,
 `talent_ops_confirm_interview_schedule`, `talent_ops_list_upcoming_interviews`, and
-`talent_ops_list_overdue_feedback`, plus the `recruiting://` policy and template resources
-and three guided prompts.
+`talent_ops_list_overdue_feedback`, plus the `recruiting://` policy and template resources and
+three guided prompts.
 
 ### Preview and confirmation
 
@@ -167,9 +182,9 @@ MCP client (Claude, Inspector)
    ▼
 server.py          MCPServer metadata, instructions, lifespan, tool registration
    ▼
-tools/             thin adapters: validate, delegate, translate errors    (Phase 3+)
+tools/             thin adapters: validate, delegate, translate errors    (Phase 3)
    ▼
-services/          recruiting, scheduling, confirmation, audit rules      (Phase 3+)
+services/          recruiting rules today; scheduling + confirmation      (Phase 4-5)
    ▼
 repositories/      provider-neutral contracts                            (Phase 2)
    ▼
@@ -188,25 +203,31 @@ scripts/
 src/talent_ops_mcp/
 ├── __init__.py          package version
 ├── __main__.py          console script + `python -m` entrypoint
-├── server.py            MCPServer construction, lifespan, health_check
+├── server.py            MCPServer construction, lifespan, registration, health_check
 ├── settings.py          validated TALENT_OPS_* configuration
 ├── logging_config.py    stderr-only logging
 ├── errors.py            stable error codes + the sanitisation chokepoint
 ├── models/
-│   └── domain.py        closed status/stage vocabularies (become CHECK constraints)
+│   ├── domain.py        closed status/stage vocabularies (become CHECK constraints)
+│   └── outputs.py       what the read tools return; no field can express a judgement
 ├── db/
 │   ├── base.py          declarative base, UTC datetime type, enum + naming conventions
 │   ├── schema.py        the 13 tables and their constraints
 │   ├── session.py       engine factory, SQLite pragmas, schema init, transaction scope
 │   └── seed.py          deterministic, idempotent demo dataset
-└── repositories/
-    ├── protocols.py     what the service layer may ask of storage
-    └── sqlite.py        the only implementation today; paginated, read-only
+├── repositories/
+│   ├── protocols.py     what the service layer may ask of storage
+│   └── sqlite.py        the only implementation today; paginated, read-only
+├── services/
+│   ├── pagination.py    the opaque cursor, and why it is offset-backed for now
+│   └── recruiting.py    the four read operations; repositories injected as protocols
+└── tools/
+    └── recruiting.py    MCP adapters: bounded typed inputs, descriptions, error translation
 tests/
-├── conftest.py          config isolation + database fixtures
-├── unit/                settings, errors, logging
+├── conftest.py          config isolation + database and seeded-server fixtures
+├── unit/                settings, errors, logging, cursor encoding
 ├── contract/            in-process MCP client against the real server
-├── integration/         schema constraints, seed properties, repository queries
+├── integration/         schema constraints, seed properties, repository + service queries
 └── test_mcp_smoke.py    real stdio subprocess (the only framing coverage)
 ```
 
@@ -258,16 +279,25 @@ Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) w
 | Client hangs on connect | Something wrote to stdout before serving began. Never `print()`; never add a `StreamHandler(sys.stdout)`. |
 | `ModuleNotFoundError: talent_ops_mcp` | Run through `uv run`, or `uv sync` first — the package must be installed, not just present. |
 | `os error 4551` / "Application Control policy has blocked this file" | A managed-Windows policy refused a generated console-script `.exe`. Run the module form instead — `uv run python -m pytest`. |
+| **Every `python` command exits `0xC0E90002` / `-1058471934` and prints nothing at all** | Windows **Smart App Control** is blocking uv's Python. uv installs python-build-standalone, whose `python311.dll` is unsigned, so the interpreter dies before it can write a single byte — including to stderr. A test command that prints nothing looks exactly like a passing one, so check this first. Confirm it with `Get-WinEvent -LogName Microsoft-Windows-CodeIntegrity/Operational` and look for event 3077 naming the DLL. Reinstalling the interpreter does not help. Fix: rebuild the venv on a *signed* interpreter — `uv sync --python "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"`. Do not disable Smart App Control to work around this: it cannot be re-enabled without resetting Windows. |
 | `os error 396` on `uv build`, or `os error 5` on `uv sync` | uv's hardlinking and file replacement fail under OneDrive. Do not keep this repository in a synced folder; `.venv` and `.git` both get locked mid-operation. Fixed by moving it out — a lock landing mid-`git rebase` is the genuinely dangerous case. |
 | Tests pass but changes seem to have no effect | The editable install may point at an old copy of the repository. Check `.venv/Lib/site-packages/talent_ops_mcp-*.dist-info/direct_url.json`; if the path is wrong, `rm -rf .venv` and `uv sync --all-groups`. |
 
 ## Known limitations
 
-- **Data, but no tools over it yet.** Phase 2 delivers the schema, repositories, and seed.
-  `health_check` is still the only MCP tool; the recruiting tools are Phases 3–6.
-- **Repositories cover reads only, for four entities.** Jobs, candidates, applications, and
-  interviewers. Availability and interview queries arrive with the scheduling engine in
-  Phase 4, which is where their access patterns are actually specified.
+- **Reads only.** Phase 3 delivers four read tools over the seeded data. Nothing in this server
+  can yet create, change, or cancel an interview; that is Phases 4–5, behind the preview and
+  confirmation protocol above.
+- **Repositories cover reads only, for five entities.** Jobs, candidates, applications,
+  interview plans, and interviewers. Availability and interview queries arrive with the
+  scheduling engine in Phase 4, which is where their access patterns are actually specified.
+- **Cursors are opaque but offset-backed.** They cannot be constructed or reasoned about by a
+  caller, which is the property that matters here, but a row inserted before the current window
+  still shifts a page by one. Against a local single-writer SQLite file that cannot happen
+  mid-session; the keyset upgrade belongs with the live ATS in Phases 9–10.
+- **`awaiting_scheduling` is derived, never stored.** Booking or cancelling an interview changes
+  it with no second write to keep in step — but since nothing writes interviews yet, that path is
+  proved only against the seed's already-booked and already-cancelled rows.
 - **`create_all`, not migrations.** Schema changes need `--reset`; see *Schema management*.
 - **Legacy timezone aliases are accepted.** `EST`, `MST`, and `HST` are real IANA entries so
   the validator passes them, but they carry no daylight saving — `EST` is UTC-5 even in July.

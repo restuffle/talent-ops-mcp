@@ -10,9 +10,17 @@ development and thirty thousand in front of a model with a context limit.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
-from talent_ops_mcp.db.schema import Application, Candidate, Interviewer, Job
+from talent_ops_mcp.db.schema import (
+    Application,
+    Candidate,
+    Interviewer,
+    InterviewPlan,
+    InterviewPlanSkillRequirement,
+    Job,
+)
 from talent_ops_mcp.models.domain import ApplicationStatus, JobStatus, Stage
 
 # PEP 695 (`class Page[T]`) would read better but lands in 3.12; this project pins 3.11.
@@ -50,6 +58,40 @@ class Paginated(Protocol):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class ApplicationSummaryRow:
+    """An application joined to the two names needed to display it.
+
+    A separate shape from :class:`~talent_ops_mcp.db.schema.Application` because it answers a
+    different question. The entity is what Phases 4-5 mutate; this is what a coordinator reads,
+    and building it in SQL is what keeps a page of twenty-five rows from becoming fifty follow-up
+    lookups.
+    """
+
+    id: str
+    candidate_id: str
+    candidate_name: str
+    job_id: str
+    job_title: str
+    current_stage: Stage
+    status: ApplicationStatus
+    awaiting_scheduling: bool
+    last_activity_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ActivePlan:
+    """The one active plan for a (job, stage) plus its skill requirements.
+
+    Returned together because a plan without its requirements is not usable by the scheduler and
+    every caller of one wants the other; splitting them would only invite a caller to forget the
+    second query.
+    """
+
+    plan: InterviewPlan
+    requirements: tuple[InterviewPlanSkillRequirement, ...]
+
+
 class JobRepository(Paginated, Protocol):
     """Reads over requisitions."""
 
@@ -58,6 +100,7 @@ class JobRepository(Paginated, Protocol):
     async def list(
         self,
         *,
+        query: str | None = None,
         status: JobStatus | None = None,
         department: str | None = None,
         limit: int = 25,
@@ -85,7 +128,13 @@ class CandidateRepository(Paginated, Protocol):
 
 
 class ApplicationRepository(Paginated, Protocol):
-    """Reads over applications, the join between a candidate and a job."""
+    """Reads over applications, the join between a candidate and a job.
+
+    ``awaiting_scheduling`` is the "scheduling need" filter of §7.1, stated as a query rather than
+    a stored column so it cannot go stale: an application needs coordination when it is active,
+    its current stage has an approved plan, and nothing is on the calendar for it yet. Booking an
+    interview makes it false with no second write to remember.
+    """
 
     async def get(self, application_id: str) -> Application | None: ...
 
@@ -93,11 +142,37 @@ class ApplicationRepository(Paginated, Protocol):
         self,
         *,
         job_id: str | None = None,
+        candidate_id: str | None = None,
         stage: Stage | None = None,
         status: ApplicationStatus | None = None,
+        awaiting_scheduling: bool | None = None,
         limit: int = 25,
         offset: int = 0,
     ) -> Page[Application]: ...
+
+    async def list_summaries(
+        self,
+        *,
+        job_id: str | None = None,
+        candidate_id: str | None = None,
+        stage: Stage | None = None,
+        status: ApplicationStatus | None = None,
+        awaiting_scheduling: bool | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> Page[ApplicationSummaryRow]: ...
+
+
+class InterviewPlanRepository(Protocol):
+    """Reads over approved interview plans.
+
+    Not :class:`Paginated`: a plan is addressed by (job, stage) and at most one is active, so
+    there is no collection to bound. Superseded plans are retained in the table but are not
+    reachable through this interface -- returning an inactive plan to a scheduler would be
+    handing it withdrawn policy.
+    """
+
+    async def get_active(self, job_id: str, stage: Stage) -> ActivePlan | None: ...
 
 
 class InterviewerRepository(Paginated, Protocol):

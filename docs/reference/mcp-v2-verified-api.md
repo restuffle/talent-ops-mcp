@@ -196,6 +196,37 @@ A non-model return (e.g. `-> str`) is auto-wrapped as `{"result": ...}`.
 explicit `null`s for `NotRequired` keys, and #3227 breaks `NotRequired` on Python 3.10. Both are avoided
 entirely by using `BaseModel`.
 
+### 5.1.1 `Annotated[T, Field(...)]` parameters — **VERIFIED** (Phase 3)
+
+Both spellings of a bounded parameter produce the same `input_schema`:
+
+```python
+limit: int = Field(default=25, ge=1, le=50)  # plain default
+limit: Annotated[int, Field(ge=1, le=50)] = 25  # equivalent, and B008-clean
+```
+
+`Annotated` is what this project uses. `= Field(...)` puts a function call in an argument default,
+which flake8-bugbear's B008 objects to; ruff's B008 exempts it only when the annotation is a type it
+can prove immutable, so a `StrEnum`-typed parameter trips it and a `str`-typed one does not — an
+inconsistency not worth carrying across a signature.
+
+Observed for `Annotated[Colour | None, Field(description=...)] = None` where `Colour` is a `StrEnum`:
+
+```json
+"$defs": {"Colour": {"enum":["red","blue"], "title":"Colour", "type":"string"}},
+"properties": {"colour": {"anyOf":[{"$ref":"#/$defs/Colour"},{"type":"null"}],
+                          "default": null, "description": "A closed set."}}
+```
+
+`description`, `max_length`, `ge`, and `le` all propagate, and **the SDK enforces them before the
+tool body runs** — an out-of-range `limit`, an over-long string, or an enum value that is not a
+member all come back as `is_error=True` with a pydantic message naming the offending parameter. That
+message quotes the rejected input (truncated), so it is caller-visible text, but it discloses nothing
+about the server.
+
+Reproduce: `docs/reference/probes/` pattern; the Phase 3 probe is
+`tests/contract/test_recruiting_tools.py::test_input_outside_the_advertised_schema_is_refused`.
+
 ### 5.2 Tool annotations
 
 `ToolAnnotations` fields are snake_case with camelCase wire aliases:
