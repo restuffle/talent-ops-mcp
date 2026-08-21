@@ -5,10 +5,11 @@ assistant coordinate recruiting **logistics** — finding jobs and applications,
 compatible interview times, and creating interviews after a human confirms the exact
 proposed action.
 
-> **Status: Phase 3 of 11 complete.** The package installs, the stdio server starts, an MCP
-> client connects, and five read-only tools answer real recruiting questions over a seeded
-> SQLite database. The scheduling engine, the preview/confirm protocol, resources and prompts
-> land in Phases 4–6. See [PLAN.md](PLAN.md) for the checklist and
+> **Status: Phase 4 of 11 complete.** The package installs, the stdio server starts, an MCP
+> client connects, five read-only tools answer real recruiting questions over a seeded SQLite
+> database, and the deterministic scheduling engine computes conflict-free interview times from
+> approved policy. The preview/confirm protocol, resources and prompts land in Phases 5–6. See
+> [PLAN.md](PLAN.md) for the checklist and
 > [docs/reference/mcp-v2-verified-api.md](docs/reference/mcp-v2-verified-api.md) for the
 > verified SDK behaviour every phase is written against.
 
@@ -144,6 +145,7 @@ the same client.
 | `talent_ops_list_applications` | Read | None | Applications by job, candidate, stage, status, or scheduling need. Paginated. |
 | `talent_ops_get_candidate` | Read | None | One candidate by id, with contact details, timezone, and pipeline context. |
 | `talent_ops_get_interview_plan` | Read | None | The approved duration, panel, buffers, lead time, and skills for one (job, stage). |
+| `talent_ops_propose_interview_slots` | Compute | None | Conflict-free interview times for one application, built from its approved plan. Reserves nothing. |
 
 Every list tool returns `total`, `count`, `has_more`, and `next_cursor` — not just items and a
 cursor, so the model can tell a partial answer from a complete one without paging to exhaustion.
@@ -154,10 +156,15 @@ is reachable only by exact id. There is no bulk read of contact details, and no 
 anywhere carries a score, rating, rank, or anything else that could be read as a judgement about
 a person — a contract test asserts that against every registered tool.
 
-Phases 4–6 add `talent_ops_propose_interview_slots`, `talent_ops_preview_interview_schedule`,
-`talent_ops_confirm_interview_schedule`, `talent_ops_list_upcoming_interviews`, and
-`talent_ops_list_overdue_feedback`, plus the `recruiting://` policy and template resources and
-three guided prompts.
+`talent_ops_propose_interview_slots` computes; it does not book. Every option satisfies the
+stage's approved plan exactly — duration, panel size, required skills, buffers, minimum lead time,
+working-hours policy — and holds no time, so two options can be valid now and only one bookable
+later. When nothing works it returns an empty list with a coded reason and the next thing to
+change, rather than an error the caller has to interpret.
+
+Phases 5–6 add `talent_ops_preview_interview_schedule`, `talent_ops_confirm_interview_schedule`,
+`talent_ops_list_upcoming_interviews`, and `talent_ops_list_overdue_feedback`, plus the
+`recruiting://` policy and template resources and three guided prompts.
 
 ### Preview and confirmation
 
@@ -184,7 +191,7 @@ server.py          MCPServer metadata, instructions, lifespan, tool registration
    ▼
 tools/             thin adapters: validate, delegate, translate errors    (Phase 3)
    ▼
-services/          recruiting rules today; scheduling + confirmation      (Phase 4-5)
+services/          recruiting reads and the scheduling engine; confirmation (Phase 5)
    ▼
 repositories/      provider-neutral contracts                            (Phase 2)
    ▼
@@ -220,14 +227,17 @@ src/talent_ops_mcp/
 │   └── sqlite.py        the only implementation today; paginated, read-only
 ├── services/
 │   ├── pagination.py    the opaque cursor, and why it is offset-backed for now
-│   └── recruiting.py    the four read operations; repositories injected as protocols
+│   ├── recruiting.py    the four read operations; repositories injected as protocols
+│   └── scheduling.py    interval algebra, panel selection, and the deterministic slot search
 └── tools/
-    └── recruiting.py    MCP adapters: bounded typed inputs, descriptions, error translation
+    ├── __init__.py      the read-only annotations and id bound both adapters share
+    ├── recruiting.py    MCP adapters: bounded typed inputs, descriptions, error translation
+    └── scheduling.py    the propose-slots adapter; preview and confirm join it in Phase 5
 tests/
 ├── conftest.py          config isolation + database and seeded-server fixtures
-├── unit/                settings, errors, logging, cursor encoding
+├── unit/                settings, errors, logging, cursor encoding, interval algebra
 ├── contract/            in-process MCP client against the real server
-├── integration/         schema constraints, seed properties, repository + service queries
+├── integration/         schema constraints, seed properties, repositories, both services
 └── test_mcp_smoke.py    real stdio subprocess (the only framing coverage)
 ```
 
@@ -285,12 +295,24 @@ Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) w
 
 ## Known limitations
 
-- **Reads only.** Phase 3 delivers four read tools over the seeded data. Nothing in this server
-  can yet create, change, or cancel an interview; that is Phases 4–5, behind the preview and
-  confirmation protocol above.
-- **Repositories cover reads only, for five entities.** Jobs, candidates, applications,
-  interview plans, and interviewers. Availability and interview queries arrive with the
-  scheduling engine in Phase 4, which is where their access patterns are actually specified.
+- **Reads and computation only.** Nothing in this server can yet create, change, or cancel an
+  interview. `propose_interview_slots` works out which times are valid and holds none of them;
+  booking is Phase 5, behind the preview and confirmation protocol above.
+- **Business hours are 09:00–17:00, Monday to Friday, and are a constant.** Not configurable and
+  not per-region. The approved interview plan already decides *whose* hours bind a slot, and the
+  honest home for a team that works different hours is that plan rather than one global
+  environment variable that would be wrong for whichever office it was not set for. A plan can opt
+  out entirely with the `extended_hours` policy, under which declared availability is the only
+  constraint.
+- **Options are the earliest valid times, not a spread.** With a quarter-hour grid the first three
+  options for a wide-open morning are 11:00, 11:15, and 11:30 — correct per §9.2 step 11, which
+  sorts by earliest time and nothing else, but not what a coordinator would offer a candidate.
+  Spacing them is a product decision nobody has made yet; raise `max_options` to see further into
+  the day in the meantime.
+- **The interviewer pool is capped at 200 per request.** The demo has six. Beyond the cap the
+  proposals are computed from an arbitrary subset, so the repository logs a warning rather than
+  truncating silently. Pushing skill filtering into the query belongs with the ATS adapter in
+  Phases 9–10.
 - **Cursors are opaque but offset-backed.** They cannot be constructed or reasoned about by a
   caller, which is the property that matters here, but a row inserted before the current window
   still shifts a page by one. Against a local single-writer SQLite file that cannot happen
@@ -298,6 +320,8 @@ Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) w
 - **`awaiting_scheduling` is derived, never stored.** Booking or cancelling an interview changes
   it with no second write to keep in step — but since nothing writes interviews yet, that path is
   proved only against the seed's already-booked and already-cancelled rows.
+- **A proposal is not a hold.** Two callers can be handed the same time. Phase 5 re-runs every
+  conflict check inside the write transaction, which is where that race is actually settled.
 - **`create_all`, not migrations.** Schema changes need `--reset`; see *Schema management*.
 - **Legacy timezone aliases are accepted.** `EST`, `MST`, and `HST` are real IANA entries so
   the validator passes them, but they carry no daylight saving — `EST` is UTC-5 even in July.

@@ -2,8 +2,8 @@
 
 ## Phased Project Plan
 
-**Document version:** 1.1  
-**Prepared:** July 24, 2026 · **Revised:** August 6, 2026  
+**Document version:** 1.4  
+**Prepared:** July 24, 2026 · **Revised:** August 21, 2026  
 **Initial delivery model:** Local MCP server over stdio  
 **Initial data source:** SQLite populated only with fictional recruiting data  
 **Future integrations:** Greenhouse Harvest API v3 or Lever, plus Microsoft Graph or Google Calendar
@@ -18,8 +18,8 @@
 | 1 — Foundation and MCP handshake | ✅ Complete | All gates green: ruff, mypy, 41 passed / 1 skipped, `uv build` |
 | 2 — SQLite schema, repository, seed | ✅ Complete | 13 tables, 83-row deterministic seed; gates green: 129 passed / 1 skipped |
 | 3 — Read-only recruiting tools | ✅ Complete | 4 read tools, cursor pagination; gates green: 230 passed / 1 skipped, `uv build` |
-| 4 — Deterministic scheduling engine | ⬜ Not started | Next |
-| 5 — Preview and confirmed scheduling | ⬜ Not started | |
+| 4 — Deterministic scheduling engine | ✅ Complete | 1 compute tool, 8 no-slot reasons; gates green: 350 passed / 1 skipped, `uv build` |
+| 5 — Preview and confirmed scheduling | ⬜ Not started | Next |
 | 6 — Reporting, resources, prompts | ⬜ Not started | |
 | 7 — Security and quality hardening | ⬜ Not started | |
 | 8 — Claude and Inspector integration | ⬜ Not started | |
@@ -284,7 +284,7 @@ talent-ops-mcp/
 │       └── prompts/                          Phase 6     workflows
 └── tests/
     ├── conftest.py                       ✅
-    ├── unit/                             ✅  settings, errors, logging, pagination
+    ├── unit/                             ✅  settings, errors, logging, pagination, intervals
     ├── contract/                         ✅  in-process MCP client
     ├── integration/                      ✅  schema, seed, repositories, recruiting service
     ├── fixtures/                             not created — its contents are pytest fixtures,
@@ -321,7 +321,7 @@ tool, so a later phase cannot reintroduce an unprefixed name.
 | `talent_ops_list_applications` | 3 ✅ | Read | List applications by job, stage, status, or scheduling need |
 | `talent_ops_get_candidate` | 3 ✅ | Read | Retrieve one candidate and relevant application context |
 | `talent_ops_get_interview_plan` | 3 ✅ | Read | Retrieve approved duration, panel, skill, and scheduling rules |
-| `talent_ops_propose_interview_slots` | 4 | Compute/read | Calculate compatible slots without changing state |
+| `talent_ops_propose_interview_slots` | 4 ✅ | Compute/read | Calculate compatible slots without changing state |
 | `talent_ops_preview_interview_schedule` | 5 | Local preview | Create an exact, expiring proposal and confirmation token |
 | `talent_ops_confirm_interview_schedule` | 5 | Mutation | Atomically create one interview from an unchanged valid preview |
 | `talent_ops_list_upcoming_interviews` | 6 | Read | Report upcoming interviews using bounded date filters |
@@ -561,6 +561,9 @@ The scheduling engine is deterministic application logic, not model reasoning.
 - Maximum number of returned options.
 
 ### 9.2 Algorithm
+
+Implemented in `services/scheduling.py` (Phase 4). Steps 4-8 are the interval algebra at the top
+of that module; steps 9-12 are `select_panel` and the scan below it.
 
 1. Validate that the application is active and at the expected stage.
 2. Resolve the active interview plan.
@@ -991,7 +994,7 @@ upgrade and the point (a live ATS, Phases 9-10) at which it stops being over-eng
 
 ---
 
-## Phase 4 — Deterministic Scheduling Engine
+## Phase 4 — Deterministic Scheduling Engine ✅
 
 ### Objective
 
@@ -999,37 +1002,128 @@ Calculate valid interview slots without modifying state.
 
 ### Tasks
 
-- [ ] Implement interval normalization and intersection.
-- [ ] Implement busy-time subtraction.
-- [ ] Implement buffers and lead-time rules.
-- [ ] Implement interviewer eligibility and skill coverage.
-- [ ] Implement panel combination selection.
-- [ ] Implement 15-minute slot alignment.
-- [ ] Implement deterministic option ordering.
-- [ ] Implement `talent_ops_propose_interview_slots`.
-- [ ] Explain why options are valid without exposing private calendar details.
-- [ ] Return a clear reason when no slot exists.
+- [x] Implement interval normalization and intersection. `services/scheduling.py` — `Interval`
+      plus `merge`, `subtract`, `clamp`, `covered_by`, `overlaps_any`. Half-open `[start, end)`
+      throughout, so touching intervals neither clash nor hide a slot that straddles the seam.
+- [x] Implement busy-time subtraction. Each panellist's free time is `subtract(availability,
+      commitments)`, computed once per request rather than per slot.
+- [x] Implement buffers and lead-time rules. Buffers are deliberately asymmetric — see note 3.
+- [x] Implement interviewer eligibility and skill coverage. `list_active_with_skills` returns the
+      pool with skills attached; coverage is decided per *combination*, which no per-row filter
+      can express.
+- [x] Implement panel combination selection. First valid combination in interviewer-id order.
+- [x] Implement 15-minute slot alignment. `align_up` against a UTC epoch, integer `timedelta`
+      arithmetic. The grid is `TALENT_OPS_SLOT_INTERVAL_MINUTES`, already in §15.
+- [x] Implement deterministic option ordering. Earliest first, one option per start time.
+- [x] Implement `talent_ops_propose_interview_slots`. `tools/scheduling.py`.
+- [x] Explain why options are valid without exposing private calendar details.
+      `why_these_are_valid` states the rules every option passed; it never names who was busy.
+- [x] Return a clear reason when no slot exists. `no_options_code` (eight members) plus
+      `no_options_reason`, which names the one thing to change next.
 
-### Tests
+### Tests — 350 passed, 1 skipped
 
-- Single interviewer.
-- Multi-person panel.
-- Skill coverage.
-- Insufficient eligible interviewers.
-- Candidate unavailable.
-- Interviewer conflict.
-- Buffer conflict.
-- Minimum lead-time violation.
-- Cross-timezone scheduling.
-- Daylight-saving spring-forward and fall-back.
-- Half-hour timezone.
-- Boundary-touching intervals.
-- Deterministic ordering.
-- Maximum option count.
+- [x] Single interviewer.
+- [x] Multi-person panel.
+- [x] Skill coverage — including one panellist covering two requirements, and a requirement for
+      two holders of one skill.
+- [x] Insufficient eligible interviewers. Distinguished from "eligible but never free": the first
+      says widening the dates will not help, the second says it will.
+- [x] Candidate unavailable, and candidate windows too short for the plan's duration.
+- [x] Interviewer conflict — plus the two statuses that are *not* conflicts, cancelled and
+      completed (§9.3).
+- [x] Buffer conflict. The same world twice, with and without the buffer, so the buffer is the
+      only difference between an option and no option.
+- [x] Minimum lead-time violation, both as a filter and as a whole-range refusal.
+- [x] Cross-timezone scheduling — Tokyo/Los Angeles, and the unhappy Sydney/New York case where
+      two working days never meet.
+- [x] Daylight-saving spring-forward and fall-back. Spring forward asserts no `02:xx` local time
+      is ever proposed and that consecutive grid points render 01:45 → 03:00; fall back asserts the
+      repeated 01:00 hour comes back as two options with different UTC offsets.
+- [x] Half-hour timezone. Asia/Kolkata, whose working day starts at 03:30 UTC.
+- [x] Boundary-touching intervals, at both levels: the algebra, and two adjacent candidate windows
+      that are individually too short and jointly long enough.
+- [x] Deterministic ordering. Two identical requests compared by `model_dump()`, panel included.
+- [x] Maximum option count, and `more_options_exist` when it bit.
 
-### Completion gate
+### Completion gate — met
 
-Given the seeded Backend Engineer scenario, the server returns at least three correct, conflict-free options and produces identical ordering across repeated runs.
+> Given the seeded Backend Engineer scenario, the server returns at least three correct,
+> conflict-free options and produces identical ordering across repeated runs.
+
+Asserted in `test_the_phase_4_completion_gate`. As in Phase 3, the demo dataset has no "Backend
+Engineer"; the equivalent is `app_02` at the Senior Platform Engineer technical screen — 60
+minutes, one panellist holding `python`, 48 hours' notice, quarter-hour buffers, both parties'
+business hours. It yields five options, byte-identical across runs, every one of them inside
+business hours in the candidate's zone, after the lead-time cutoff, and clear of the interview
+`int_avery` already holds that week.
+
+### Revision 1.4 notes (August 21, 2026)
+
+Seven decisions worth recording.
+
+1. **Business hours are a constant, not configuration.** `BUSINESS_DAY_START = 09:00`,
+   `BUSINESS_DAY_END = 17:00`, Monday to Friday, in `services/scheduling.py`. §15's variable list
+   is unchanged and deliberately so: the plan already decides *whose* hours bind a slot, and the
+   honest home for a team that works different hours is the approved plan — which carries every
+   other scheduling number — not one global variable that would be wrong for whichever office it
+   was not set for. Phase 6 will publish these two times through
+   `recruiting://policies/scheduling` by importing them, so the policy a human reads and the one
+   the engine applies stay the same object.
+2. **`EXTENDED_HOURS` opts out rather than widening.** §8.1 names the member but no hours for it.
+   Inventing a second pair of magic numbers would double the surface; under this policy declared
+   availability *is* the policy, which is what an out-of-hours or cross-hemisphere interview
+   needs.
+3. **Buffers bind interviewers, not the candidate.** §9.3 says every *interviewer* must be free
+   "for the full interval plus required buffers" — preparation and write-up time. A candidate who
+   says they are free from 15:00 can start at 15:00; silently requiring a quarter-hour of their
+   evening would refuse a slot they themselves offered. Existing commitments block the padded span
+   for everyone, because nobody can be in two places at once. One test isolates each half.
+4. **Grid points are generated in UTC and converted outwards.** Local time is used for exactly two
+   things: the working-hours test and rendering. UTC → local is always single-valued, so §9.3's
+   rule about nonexistent and ambiguous local times is satisfied by construction rather than by a
+   special case. The one place a local input becomes an instant is the requested date range, which
+   resolves both bounds at local midnight with `fold=0` — a zone whose transition happens *at*
+   midnight can move a bound by an hour, which cannot change a result because every slot is
+   filtered by working hours or declared availability, neither of which reaches midnight.
+5. **Panel selection is positional, and that is the point.** The first valid combination in
+   interviewer-id order. §2.3 forbids this server ranking people, so the tiebreak has to be
+   arbitrary and reproducible rather than anything a reader could mistake for merit. It also gives
+   §9.2 step 10 free: one panel per slot means no two options can differ only in who is on them.
+   §9.2 step 11's other two sort keys are subsumed — coverage is a hard filter, and fragmentation
+   is nil because every option is one contiguous interval.
+6. **No slots is a result, not an error.** An empty `options` list with a code and a sentence. A
+   caller handed an error instead has to guess whether it asked wrongly or the diary is simply
+   full. Errors stay for requests that cannot be answered at all: unknown application, one that is
+   not `active`, a stage with no approved plan, a range breaking a configured bound.
+7. **An over-long date range is refused, not clamped.** The opposite of the `limit` rule, and for
+   a reason: a short page is still a true answer with `has_more` to prove it, whereas a silently
+   shortened range reports "nothing available" for a fortnight the caller believes it searched.
+
+Two smaller ones. `tools/__init__.py` gained `ID_MAX_LENGTH`, `READ_ONLY`, and
+`read_only_annotations` when a second adapter module needed them — three shared facts, not a
+framework. And the Phase 4 contract tests reseed the demo dataset onto the week after next using
+the seed's existing `anchor` parameter: the tool reads the real clock, so a fixed-anchor database
+would have made that file go red on a calendar date rather than on a code change.
+
+### Deliberately deferred
+
+- **Options are the earliest valid times, not a spread.** For a wide-open morning the first three
+  are 11:00, 11:15, 11:30 — correct per §9.2 step 11, which sorts by earliest time and nothing
+  else, and not what a coordinator would offer a candidate. Spacing them is a product decision the
+  plan does not make, and inventing one here would be the engine deciding policy. A
+  `minimum_spacing_minutes` parameter would be a few lines if Phase 5 or 6 wants it; raising
+  `max_options` is the workaround until then.
+- **The interviewer pool is capped at 200 per request.** Beyond it the repository logs a warning
+  rather than truncating in silence. Pushing skill filtering into the query belongs with the ATS
+  adapter in Phases 9–10, where a provider exists to push it into.
+- **Panel search is brute force over combinations, capped at 5000 per distinct free set.** Free
+  sets repeat across neighbouring slots, so the search is memoised and runs once per set rather
+  than once per slot. Giving up is reported as `PANEL_COVERAGE` and never as a valid option; the
+  upgrade, if it ever fires in anger, is bipartite matching of skills to seats.
+- **A proposal still holds nothing.** Two callers can be handed the same time. §9.3 says so
+  explicitly and Phase 5 settles it, by re-running every conflict check inside the write
+  transaction.
 
 ---
 

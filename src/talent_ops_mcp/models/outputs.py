@@ -12,12 +12,15 @@ seniority judgement, or any other field a reader could mistake for an assessment
 prompted into emitting one. Names are present because coordination is impossible without them,
 but nothing derived from a name is.
 
-Every timestamp is timezone-aware UTC, and every entity that a human will be shown a time for
-carries its own IANA zone (§8.2), so a caller never has to guess which clock a datetime belongs
-to.
+Every timestamp is timezone-aware, and every entity that a human will be shown a time for carries
+its own IANA zone (§8.2), so a caller never has to guess which clock a datetime belongs to. Fields
+named ``*_utc`` are UTC; the two named ``*_local`` on :class:`InterviewSlotOption` are the same
+instants in the candidate's display zone, carrying the offset that tells a repeated daylight-saving
+hour apart from its twin (§9.3).
 """
 
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
@@ -165,4 +168,126 @@ class InterviewPlanDetail(BaseModel):
     working_hours_policy: WorkingHoursPolicy = Field(description="Whose business hours bound a proposed slot.")
     skill_requirements: list[SkillRequirement] = Field(
         description="Empty when the plan demands no specific skills. All requirements must be met together."
+    )
+
+
+class SlotUnavailableReason(StrEnum):
+    """Why a proposal search returned nothing (§12 Phase 4, "a clear reason when no slot exists").
+
+    A code as well as a sentence, because the two are for different readers. The sentence tells a
+    model what to say and what to try next; the code is what a test can assert on and what a
+    future client can branch on without matching prose. Every member names a *different* fix, which
+    is the point -- "no slots" alone leaves a caller guessing between widening the dates, chasing
+    the candidate for availability, and telling a recruiter the panel cannot be staffed.
+
+    Not a :mod:`~talent_ops_mcp.models.domain` member: nothing here is ever written to a column, so
+    it carries no ``CHECK`` constraint and no migration cost.
+
+    None of these names anyone. §8.2 keeps other people's calendars private, so a reason may say
+    that no panel was free, never who was busy or what they were doing.
+    """
+
+    NO_ELIGIBLE_INTERVIEWERS = "NO_ELIGIBLE_INTERVIEWERS"
+    """No panel of the required size and skills exists among active interviewers, at any time."""
+
+    OUTSIDE_LEAD_TIME = "OUTSIDE_LEAD_TIME"
+    """The requested range ends before the plan's minimum lead time has elapsed."""
+
+    NO_CANDIDATE_AVAILABILITY = "NO_CANDIDATE_AVAILABILITY"
+    """The candidate declared no free block long enough for this interview inside the range."""
+
+    NO_INTERVIEWER_AVAILABILITY = "NO_INTERVIEWER_AVAILABILITY"
+    """No eligible interviewer declared any availability inside the range."""
+
+    ATTENDEE_CONFLICT = "ATTENDEE_CONFLICT"
+    """The candidate is already booked across every time that would otherwise have worked."""
+
+    OUTSIDE_WORKING_HOURS = "OUTSIDE_WORKING_HOURS"
+    """The candidate's free time falls outside the working hours this plan requires."""
+
+    NO_AVAILABLE_PANEL = "NO_AVAILABLE_PANEL"
+    """Fewer than the required number of interviewers were free at any one candidate-compatible time."""
+
+    PANEL_COVERAGE = "PANEL_COVERAGE"
+    """Enough interviewers were free, but never a combination covering every required skill."""
+
+
+class ProposedPanellist(BaseModel):
+    """One interviewer on a proposed panel.
+
+    Name and timezone only. No email -- an invitation is Phase 5's job and goes out through a
+    confirmed operation, not through whatever the model does with a proposal -- and nothing
+    evaluative, because the engine picks panels positionally and this schema must not suggest
+    otherwise (§2.3).
+    """
+
+    id: str = Field(description="Stable interviewer identifier.")
+    name: str = Field(description="Display name only. Never a basis for any judgement about the person.")
+    timezone: str = Field(description="IANA timezone. Quote the time to this panellist in their own zone.")
+
+
+class InterviewSlotOption(BaseModel):
+    """One conflict-free time this interview could be held.
+
+    A proposal, not a hold: §9.3 is explicit that options reserve nothing, so two of these may be
+    valid now and only one bookable later. Phase 5's confirmation re-checks every conflict inside
+    the write transaction rather than trusting this.
+    """
+
+    start_utc: datetime = Field(description="UTC start. This is the instant; the local fields are the same one.")
+    end_utc: datetime = Field(description="UTC end.")
+    start_local: datetime = Field(
+        description=(
+            "The same instant as start_utc, expressed in display_timezone with its UTC offset. "
+            "Quote this to the candidate; the offset is what disambiguates a daylight-saving repeat."
+        )
+    )
+    end_local: datetime = Field(description="The same instant as end_utc, expressed in display_timezone.")
+    display_timezone: str = Field(description="IANA timezone the local fields are expressed in.")
+    duration_minutes: int = Field(description="From the approved plan. Never adjusted to make a slot fit.")
+    panel: list[ProposedPanellist] = Field(
+        description="The interviewers this option assumes. Panel membership is part of the option, not a suggestion."
+    )
+
+
+class SlotProposalResult(BaseModel):
+    """Proposed interview times for one application, or the reason there are none.
+
+    Carries the plan and identifier context the next step needs, so preparing a preview does not
+    require re-reading the application, the plan, and the candidate to find out what was proposed.
+    """
+
+    application_id: str
+    candidate_id: str
+    candidate_name: str = Field(description="Display name only. Never a basis for any judgement about the person.")
+    job_id: str
+    job_title: str
+    stage: Stage = Field(description="Pipeline stage the plan applies to.")
+    interview_plan_id: str = Field(description="The approved plan every option was computed from.")
+    duration_minutes: int
+    panel_size: int = Field(description="Interviewers each option must include.")
+    display_timezone: str = Field(description="IANA timezone the local times are expressed in.")
+    searched_from_utc: datetime = Field(
+        description="Start of the window actually searched. Later than the requested start when lead time bit."
+    )
+    searched_to_utc: datetime = Field(description="End of the window actually searched.")
+    options: list[InterviewSlotOption] = Field(
+        description="Ordered earliest first. Empty when no valid time exists — see no_options_reason."
+    )
+    more_options_exist: bool = Field(
+        description=(
+            "True when valid times remain beyond max_options. Raise max_options or narrow the range to see them."
+        )
+    )
+    why_these_are_valid: str | None = Field(
+        description=(
+            "What every option was checked against, in words you can repeat to a human. "
+            "Null when options is empty. Says nothing about anyone's private calendar."
+        )
+    )
+    no_options_reason: str | None = Field(
+        description="Why nothing could be proposed, and what to change. Null when options is non-empty."
+    )
+    no_options_code: SlotUnavailableReason | None = Field(
+        description="Stable code for no_options_reason, safe to branch on. Null when options is non-empty."
     )

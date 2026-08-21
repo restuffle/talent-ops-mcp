@@ -45,6 +45,7 @@ async def test_stdio_subprocess_handshake_and_health_check(tmp_path: Path, subpr
         f"{TOOL_PREFIX}_list_applications",
         f"{TOOL_PREFIX}_get_candidate",
         f"{TOOL_PREFIX}_get_interview_plan",
+        f"{TOOL_PREFIX}_propose_interview_slots",
     }
     assert result.is_error is False
     assert result.structured_content is not None

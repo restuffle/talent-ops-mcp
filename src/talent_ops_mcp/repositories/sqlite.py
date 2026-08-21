@@ -8,7 +8,10 @@ follows every sort key. Without it SQLite may return rows in any order for equal
 "page 2" could repeat or skip a row that page 1 already showed.
 """
 
+import logging
+from collections import defaultdict
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, TypeVar
 
 from sqlalchemy import ColumnElement, Select, and_, func, select
@@ -17,8 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from talent_ops_mcp.db.base import Base
 from talent_ops_mcp.db.schema import (
     Application,
+    AvailabilityWindow,
     Candidate,
     Interview,
+    InterviewAttendee,
     Interviewer,
     InterviewerSkill,
     InterviewPlan,
@@ -26,8 +31,16 @@ from talent_ops_mcp.db.schema import (
     Job,
 )
 from talent_ops_mcp.errors import DomainError, ErrorCode
-from talent_ops_mcp.models.domain import ApplicationStatus, InterviewStatus, JobStatus, Stage
-from talent_ops_mcp.repositories.protocols import ActivePlan, ApplicationSummaryRow, Page
+from talent_ops_mcp.models.domain import ApplicationStatus, InterviewStatus, JobStatus, PartyType, Stage
+from talent_ops_mcp.repositories.protocols import (
+    ActivePlan,
+    ApplicationSummaryRow,
+    InterviewerProfile,
+    Page,
+    PartyInterval,
+)
+
+_log = logging.getLogger(__name__)
 
 _ModelT = TypeVar("_ModelT", bound=Base)
 
@@ -403,3 +416,146 @@ class SqliteInterviewerRepository(_Repository):
             )
             statement = statement.where(matching == len(wanted))
         return await self._paginate(statement, order_by=(Interviewer.name, Interviewer.id), limit=limit, offset=offset)
+
+    async def list_active_with_skills(self, *, limit: int) -> tuple[InterviewerProfile, ...]:
+        """The panel-selection pool, ordered by id.
+
+        Ordered by id rather than by name because the ordering is load-bearing: §9.2 step 11
+        requires deterministic proposals, and the panel chosen for a slot is the first valid
+        combination in this order. A name is editable and a person can share one; an id is neither.
+        That also keeps the choice visibly positional rather than evaluative -- being first in id
+        order says nothing about anyone (§2.3).
+
+        Skills are fetched in a second statement rather than by joining and grouping. The join
+        would return one row per (interviewer, skill) and force the caller to regroup anyway, and
+        an interviewer holding no skills would need an outer join to survive it -- which is the
+        row a plan with no skill requirements most needs.
+        """
+        statement = select(Interviewer).where(Interviewer.active.is_(True)).order_by(Interviewer.id)
+        # One row past the bound, purely to detect that the bound bit. Silently returning `limit`
+        # rows would make a truncated pool indistinguishable from a complete one, and the
+        # proposals computed from it would look authoritative while ignoring real interviewers.
+        rows = (await self._session.execute(statement.limit(limit + 1))).scalars().all()
+        if len(rows) > limit:
+            _log.warning(
+                "interviewer pool truncated limit=%d; scheduling considered only the first %d active "
+                "interviewers by id. Proposals may omit valid panels.",
+                limit,
+                limit,
+            )
+            rows = rows[:limit]
+
+        held: defaultdict[str, set[str]] = defaultdict(set)
+        skill_rows = (
+            await self._session.execute(
+                select(InterviewerSkill).where(InterviewerSkill.interviewer_id.in_([row.id for row in rows]))
+            )
+        ).scalars()
+        for skill in skill_rows:
+            held[skill.interviewer_id].add(skill.skill_code)
+
+        return tuple(
+            InterviewerProfile(
+                id=row.id,
+                name=row.name,
+                timezone=row.timezone,
+                skills=frozenset(held[row.id]),
+            )
+            for row in rows
+        )
+
+
+class SqliteAvailabilityRepository(_Repository):
+    """Reads over :class:`~talent_ops_mcp.db.schema.AvailabilityWindow`."""
+
+    async def list_windows(
+        self,
+        *,
+        owner_type: PartyType,
+        owner_ids: Sequence[str],
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> tuple[PartyInterval, ...]:
+        """Free windows of these owners overlapping the range.
+
+        The overlap test is strict on both sides -- ``start_utc < end`` and ``end_utc > start`` --
+        so a window that merely touches the range at an instant is excluded. It contributes no
+        schedulable time, and a zero-length interval is not representable downstream.
+        """
+        if not owner_ids:
+            return ()
+        rows = (
+            (
+                await self._session.execute(
+                    select(AvailabilityWindow)
+                    .where(
+                        AvailabilityWindow.owner_type == owner_type,
+                        AvailabilityWindow.owner_id.in_(owner_ids),
+                        AvailabilityWindow.start_utc < end_utc,
+                        AvailabilityWindow.end_utc > start_utc,
+                    )
+                    .order_by(AvailabilityWindow.owner_id, AvailabilityWindow.start_utc, AvailabilityWindow.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(
+            PartyInterval(
+                party_type=owner_type,
+                party_id=row.owner_id,
+                start_utc=row.start_utc,
+                end_utc=row.end_utc,
+            )
+            for row in rows
+        )
+
+
+class SqliteInterviewRepository(_Repository):
+    """Reads over :class:`~talent_ops_mcp.db.schema.Interview` from the attendee side."""
+
+    async def list_busy(
+        self,
+        *,
+        parties: Sequence[tuple[PartyType, str]],
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> tuple[PartyInterval, ...]:
+        """Scheduled interviews overlapping the range, one row per requested attendee.
+
+        The ``(type, id)`` pair is filtered in Python after an id-only ``IN``. SQL row-value
+        comparison (``(a, b) IN ((...), ...)``) would express it in one clause, but it needs
+        SQLite 3.15+ and this project does not control which SQLite the interpreter was linked
+        against. Filtering an already-tiny result set costs nothing and depends on no version.
+        """
+        if not parties:
+            return ()
+        wanted = set(parties)
+        rows = (
+            await self._session.execute(
+                select(
+                    InterviewAttendee.attendee_type,
+                    InterviewAttendee.attendee_id,
+                    Interview.start_utc,
+                    Interview.end_utc,
+                )
+                .join(Interview, Interview.id == InterviewAttendee.interview_id)
+                .where(
+                    InterviewAttendee.attendee_id.in_({party_id for _, party_id in parties}),
+                    Interview.status == InterviewStatus.SCHEDULED,
+                    Interview.start_utc < end_utc,
+                    Interview.end_utc > start_utc,
+                )
+                .order_by(InterviewAttendee.attendee_id, Interview.start_utc, Interview.id)
+            )
+        ).all()
+        return tuple(
+            PartyInterval(
+                party_type=row.attendee_type,
+                party_id=row.attendee_id,
+                start_utc=row.start_utc,
+                end_utc=row.end_utc,
+            )
+            for row in rows
+            if (row.attendee_type, row.attendee_id) in wanted
+        )

@@ -26,7 +26,6 @@ from typing import Annotated
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from talent_ops_mcp.errors import sanitized
@@ -41,18 +40,7 @@ from talent_ops_mcp.server import TOOL_PREFIX, AppState, app_state
 from talent_ops_mcp.services.pagination import CURSOR_ADVICE, CURSOR_MAX_LENGTH
 from talent_ops_mcp.services.recruiting import DEFAULT_PAGE_SIZE, RecruitingService, sqlite_recruiting_service
 from talent_ops_mcp.settings import Settings
-
-ID_MAX_LENGTH = 64
-"""Matches ``ID = String(64)`` in the schema. Nothing longer can name a real row."""
-
-READ_ONLY = ToolAnnotations(
-    read_only_hint=True,
-    destructive_hint=False,
-    idempotent_hint=True,
-    # Local SQLite only. Flips to True in Phases 9-10 for any tool that reaches a calendar or ATS.
-    open_world_hint=False,
-)
-"""Shared by all four tools; ``title`` is set per tool at registration."""
+from talent_ops_mcp.tools import ID_MAX_LENGTH, read_only_annotations
 
 JobIdFilter = Annotated[
     str | None,
@@ -63,10 +51,6 @@ CandidateIdFilter = Annotated[
     Field(max_length=ID_MAX_LENGTH, description="Restrict to one candidate's applications."),
 ]
 Cursor = Annotated[str | None, Field(max_length=CURSOR_MAX_LENGTH, description=CURSOR_ADVICE)]
-
-
-def _annotations(title: str) -> ToolAnnotations:
-    return READ_ONLY.model_copy(update={"title": title})
 
 
 @asynccontextmanager
@@ -110,7 +94,7 @@ def register(mcp: MCPServer[AppState], settings: Settings) -> None:
             "talent_ops_get_candidate for one person. This tool says nothing about any candidate, and "
             "job data must not be used to judge who should be put forward for a role."
         ),
-        annotations=_annotations("Search recruiting jobs"),
+        annotations=read_only_annotations("Search recruiting jobs"),
     )
     async def search_jobs(
         ctx: Context[AppState],
@@ -157,7 +141,7 @@ def register(mcp: MCPServer[AppState], settings: Settings) -> None:
             "address or phone number; call talent_ops_get_candidate for the one person you need to "
             "contact."
         ),
-        annotations=_annotations("List job applications"),
+        annotations=read_only_annotations("List job applications"),
     )
     async def list_applications(
         ctx: Context[AppState],
@@ -216,7 +200,7 @@ def register(mcp: MCPServer[AppState], settings: Settings) -> None:
             "preference must not be used to infer anything about them or to compare them with anyone "
             "else. Requests of that kind are refused."
         ),
-        annotations=_annotations("Get one candidate"),
+        annotations=read_only_annotations("Get one candidate"),
     )
     async def get_candidate(
         ctx: Context[AppState],
@@ -248,7 +232,7 @@ def register(mcp: MCPServer[AppState], settings: Settings) -> None:
             "and ask a human recruiter to approve one. This tool describes process, not people, and "
             "says nothing about any candidate."
         ),
-        annotations=_annotations("Get an approved interview plan"),
+        annotations=read_only_annotations("Get an approved interview plan"),
     )
     async def get_interview_plan(
         ctx: Context[AppState],

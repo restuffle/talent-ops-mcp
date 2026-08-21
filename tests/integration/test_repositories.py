@@ -5,16 +5,21 @@ than rows invented by the test. If the seed changes, these fail -- which is the 
 is a fixture other phases will build on, and a silent change to it should not go unnoticed.
 """
 
+import logging
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from talent_ops_mcp.db.schema import Candidate
 from talent_ops_mcp.errors import DomainError, ErrorCode
-from talent_ops_mcp.models.domain import ApplicationStatus, JobStatus, Stage
+from talent_ops_mcp.models.domain import ApplicationStatus, JobStatus, PartyType, Stage
 from talent_ops_mcp.repositories.sqlite import (
     SqliteApplicationRepository,
+    SqliteAvailabilityRepository,
     SqliteCandidateRepository,
     SqliteInterviewerRepository,
+    SqliteInterviewRepository,
     SqliteJobRepository,
 )
 
@@ -247,3 +252,156 @@ async def test_skill_and_active_filters_combine(seeded_session: AsyncSession) ->
 async def test_an_unknown_skill_matches_no_one(seeded_session: AsyncSession) -> None:
     page = await SqliteInterviewerRepository(seeded_session).list(skills=("cobol",))
     assert page.total == 0
+
+
+# ------------------------------------------------------------------ scheduling reads (Phase 4)
+
+
+async def test_the_panel_pool_carries_skills_and_excludes_the_inactive(seeded_session: AsyncSession) -> None:
+    """The pool §9.2 step 3 draws from. Unlike ``list``, it is not filtered by skill -- a plan
+    whose panel is larger than its requirements has seats anyone may fill."""
+    pool = await SqliteInterviewerRepository(seeded_session).list_active_with_skills(limit=50)
+
+    assert [member.id for member in pool] == ["int_avery", "int_blake", "int_casey", "int_devon", "int_ellis"]
+    by_id = {member.id: member for member in pool}
+    assert by_id["int_avery"].skills == frozenset({"python", "distributed_systems", "system_design"})
+    assert by_id["int_avery"].name == "Avery Demo"
+    assert by_id["int_avery"].timezone == "America/Indiana/Indianapolis"
+    assert "int_frankie" not in by_id, "inactive interviewers are never eligible"
+
+
+async def test_the_panel_pool_is_ordered_by_id_not_by_name(seeded_session: AsyncSession) -> None:
+    """Load-bearing: the panel chosen for a slot is the first valid combination in this order, so
+    a reordering here silently changes which people are proposed."""
+    pool = await SqliteInterviewerRepository(seeded_session).list_active_with_skills(limit=50)
+    assert [member.id for member in pool] == sorted(member.id for member in pool)
+
+
+async def test_the_panel_pool_is_truncated_loudly(
+    seeded_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A silently truncated pool would produce proposals that look authoritative while ignoring
+    real interviewers. The bound stays; the silence does not."""
+    with caplog.at_level(logging.WARNING):
+        pool = await SqliteInterviewerRepository(seeded_session).list_active_with_skills(limit=2)
+
+    assert [member.id for member in pool] == ["int_avery", "int_blake"]
+    assert "truncated" in caplog.text
+
+
+async def test_availability_windows_overlapping_the_range_are_returned(seeded_session: AsyncSession) -> None:
+    """Overlapping, not contained: a window running from before the range into it is exactly the
+    one a slot at the range's start needs."""
+    repository = SqliteAvailabilityRepository(seeded_session)
+    # Avery's Monday window is 13:00-21:00 UTC; ask for a range that starts inside it.
+    windows = await repository.list_windows(
+        owner_type=PartyType.INTERVIEWER,
+        owner_ids=["int_avery"],
+        start_utc=datetime(2026, 9, 7, 15, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 7, 16, tzinfo=UTC),
+    )
+
+    assert len(windows) == 1
+    assert windows[0].start_utc == datetime(2026, 9, 7, 13, tzinfo=UTC)
+    assert windows[0].end_utc == datetime(2026, 9, 7, 21, tzinfo=UTC)
+    assert windows[0].party_type is PartyType.INTERVIEWER
+    assert windows[0].party_id == "int_avery"
+
+
+async def test_a_window_that_only_touches_the_range_is_excluded(seeded_session: AsyncSession) -> None:
+    """It contributes no schedulable time, and a zero-length interval is not representable."""
+    windows = await SqliteAvailabilityRepository(seeded_session).list_windows(
+        owner_type=PartyType.INTERVIEWER,
+        owner_ids=["int_avery"],
+        start_utc=datetime(2026, 9, 7, 21, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 7, 22, tzinfo=UTC),
+    )
+    assert windows == ()
+
+
+async def test_availability_never_crosses_the_owner_type(seeded_session: AsyncSession) -> None:
+    """``owner_id`` is polymorphic and carries no foreign key, so the type is the only thing
+    keeping a candidate's diary out of an interviewer's."""
+    week = (datetime(2026, 9, 7, tzinfo=UTC), datetime(2026, 9, 12, tzinfo=UTC))
+    repository = SqliteAvailabilityRepository(seeded_session)
+
+    as_interviewer = await repository.list_windows(
+        owner_type=PartyType.INTERVIEWER, owner_ids=["cand_01"], start_utc=week[0], end_utc=week[1]
+    )
+    as_candidate = await repository.list_windows(
+        owner_type=PartyType.CANDIDATE, owner_ids=["cand_01"], start_utc=week[0], end_utc=week[1]
+    )
+
+    assert as_interviewer == ()
+    assert len(as_candidate) == 2
+
+
+async def test_no_owners_asks_no_question(seeded_session: AsyncSession) -> None:
+    windows = await SqliteAvailabilityRepository(seeded_session).list_windows(
+        owner_type=PartyType.CANDIDATE,
+        owner_ids=[],
+        start_utc=datetime(2026, 9, 7, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 12, tzinfo=UTC),
+    )
+    assert windows == ()
+
+
+async def test_busy_blocks_come_back_per_attendee(seeded_session: AsyncSession) -> None:
+    """One interview with two attendees is two rows here: the scheduler asks per person, and a
+    single row would make one of them look free."""
+    blocks = await SqliteInterviewRepository(seeded_session).list_busy(
+        parties=[(PartyType.INTERVIEWER, "int_devon"), (PartyType.INTERVIEWER, "int_blake")],
+        start_utc=datetime(2026, 9, 9, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 10, tzinfo=UTC),
+    )
+
+    # The clinical-data technical screen: Wednesday 17:30-18:15 UTC, with both on the panel.
+    assert {block.party_id for block in blocks} == {"int_devon", "int_blake"}
+    for block in blocks:
+        assert block.party_type is PartyType.INTERVIEWER
+        assert block.start_utc == datetime(2026, 9, 9, 17, 30, tzinfo=UTC)
+        assert block.end_utc == datetime(2026, 9, 9, 18, 15, tzinfo=UTC)
+
+
+async def test_only_scheduled_interviews_are_busy(seeded_session: AsyncSession) -> None:
+    """§9.3: a cancelled interview frees its time, which is what makes a cancellation put the slot
+    back on the market. The seed's cancelled QA screen is Casey's only booking that week."""
+    blocks = await SqliteInterviewRepository(seeded_session).list_busy(
+        parties=[(PartyType.INTERVIEWER, "int_casey")],
+        start_utc=datetime(2026, 9, 7, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 12, tzinfo=UTC),
+    )
+    assert blocks == ()
+
+
+async def test_a_busy_block_touching_the_range_is_excluded(seeded_session: AsyncSession) -> None:
+    blocks = await SqliteInterviewRepository(seeded_session).list_busy(
+        parties=[(PartyType.INTERVIEWER, "int_avery")],
+        start_utc=datetime(2026, 9, 8, 16, tzinfo=UTC),
+        end_utc=datetime(2026, 9, 8, 17, tzinfo=UTC),
+    )
+    assert blocks == ()
+
+
+async def test_busy_blocks_never_cross_the_party_type(seeded_session: AsyncSession) -> None:
+    """``attendee_id`` is polymorphic. Asking for an interviewer whose id happens to name a
+    candidate must not import that candidate's bookings."""
+    week = (datetime(2026, 9, 7, tzinfo=UTC), datetime(2026, 9, 12, tzinfo=UTC))
+    repository = SqliteInterviewRepository(seeded_session)
+
+    as_candidate = await repository.list_busy(
+        parties=[(PartyType.CANDIDATE, "cand_02")], start_utc=week[0], end_utc=week[1]
+    )
+    as_interviewer = await repository.list_busy(
+        parties=[(PartyType.INTERVIEWER, "cand_02")], start_utc=week[0], end_utc=week[1]
+    )
+
+    assert len(as_candidate) == 1
+    assert as_interviewer == ()
+
+
+async def test_no_parties_asks_no_question(seeded_session: AsyncSession) -> None:
+    blocks = await SqliteInterviewRepository(seeded_session).list_busy(
+        parties=[], start_utc=datetime(2026, 9, 7, tzinfo=UTC), end_utc=datetime(2026, 9, 12, tzinfo=UTC)
+    )
+    assert blocks == ()

@@ -221,8 +221,9 @@ def build_server(settings: Settings) -> MCPServer[AppState]:
     # `TOOL_PREFIX` from this module, and a top-level import either way round would be a cycle
     # resolved by whichever half happened to load first. By the time this line runs, this module
     # is fully initialized.
-    from talent_ops_mcp.tools import recruiting
+    from talent_ops_mcp.tools import recruiting, scheduling
 
     recruiting.register(mcp, settings)
+    scheduling.register(mcp, settings)
 
     return mcp
