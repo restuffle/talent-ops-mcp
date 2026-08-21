@@ -307,8 +307,8 @@ Control can refuse to launch the generated `pytest.exe` shim (`os error 4551`) w
 - **Options are the earliest valid times, not a spread.** With a quarter-hour grid the first three
   options for a wide-open morning are 11:00, 11:15, and 11:30 — correct per §9.2 step 11, which
   sorts by earliest time and nothing else, but not what a coordinator would offer a candidate.
-  Spacing them is a product decision nobody has made yet; raise `max_options` to see further into
-  the day in the meantime.
+  Scheduled for Phase 5 as a `minimum_spacing_minutes` parameter; raise `max_options` to see
+  further into the day in the meantime.
 - **The interviewer pool is capped at 200 per request.** The demo has six. Beyond the cap the
   proposals are computed from an arbitrary subset, so the repository logs a warning rather than
   truncating silently. Pushing skill filtering into the query belongs with the ATS adapter in

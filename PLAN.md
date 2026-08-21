@@ -1111,9 +1111,10 @@ would have made that file go red on a calendar date rather than on a code change
 - **Options are the earliest valid times, not a spread.** For a wide-open morning the first three
   are 11:00, 11:15, 11:30 — correct per §9.2 step 11, which sorts by earliest time and nothing
   else, and not what a coordinator would offer a candidate. Spacing them is a product decision the
-  plan does not make, and inventing one here would be the engine deciding policy. A
-  `minimum_spacing_minutes` parameter would be a few lines if Phase 5 or 6 wants it; raising
-  `max_options` is the workaround until then.
+  plan does not make, and inventing one inside the engine would be the engine deciding policy.
+  **Now scheduled into Phase 5**, as a `minimum_spacing_minutes` parameter, for the reason given
+  there: Phase 5 is the first phase in which a human chooses from the set rather than the engine
+  merely validating each member of it. Raising `max_options` is the workaround until then.
 - **The interviewer pool is capped at 200 per request.** Beyond it the repository logs a warning
   rather than truncating in silence. Pushing skill filtering into the query belongs with the ATS
   adapter in Phases 9–10, where a provider exists to push it into.
@@ -1146,10 +1147,22 @@ Add the first mutation using a robust human-confirmation protocol.
 - [ ] Implement idempotency key enforcement.
 - [ ] Recheck conflicts during confirmation.
 - [ ] Return exact before/after state.
-
-### Tests
-
-- Preview makes no interview mutation.
+- [ ] **Space the proposed options** — carried forward from Phase 4, where it was identified and
+      deliberately not decided. `talent_ops_propose_interview_slots` returns the earliest valid
+      times, so the first three for an open morning are 11:00, 11:15, and 11:30. That is §9.2 step
+      11 followed literally — it sorts by earliest time and says nothing about spread — and it is
+      not what a coordinator would offer a candidate.
+      It lands here rather than in Phase 4 because Phase 5 is where a human first *chooses* from
+      the options and commits to one, so it is the first phase in which the quality of the set,
+      rather than the validity of each member, is the thing being tested. Deciding it inside the
+      engine ahead of that would have been the engine inventing policy.
+      Implement as a bounded `minimum_spacing_minutes` parameter on the propose tool, defaulting to
+      something a coordinator would actually send (60 is the obvious candidate) and settable to 0
+      for the current behaviour. Applied when *selecting* options, not when sorting them: keep the
+      earliest valid time, then skip forward past the spacing before accepting the next, so §9.2
+      step 12's bounded maximum still counts real options. `more_options_exist` keeps its meaning —
+      valid times were left out — and the reason codes are unaffected, because spacing narrows a
+      non-empty set and can never empty one.
 - Exact payload displayed.
 - Valid token confirms.
 - Expired token fails.
@@ -1159,6 +1172,10 @@ Add the first mutation using a robust human-confirmation protocol.
 - Changed application stage fails.
 - New conflict after preview fails.
 - Concurrent confirmations create at most one interview.
+- Spacing thins the option set without changing which times are valid: every returned option is
+  one the unspaced call also returned, the first is unchanged, and `minimum_spacing_minutes=0`
+  reproduces Phase 4's output exactly.
+- A day with only one valid time still returns it, whatever the spacing.
 - Forced mid-transaction error rolls back everything.
 - Success and failure audit events are recorded appropriately.
 
