@@ -11,7 +11,7 @@ keywords = ["mcp", "recruiting", "scheduling"]
 # none closed (docs/reference/mcp-v2-verified-api.md §11). The lockfile plus this pin keep
 # the blast radius of an SDK change to a deliberate, reviewed bump.
 dependencies = [
-    "mcp==2.0.0",
+    "mcp==2.2.0",
     "pydantic>=2.12",
     "pydantic-settings>=2.7",
     "sqlalchemy[asyncio]>=2.0.36",
